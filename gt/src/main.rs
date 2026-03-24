@@ -66,20 +66,20 @@ async fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let app = App::parse();
 
-    match app.command {
-        Command::Issue(cmd) => cmd.run().await?,
-        Command::Pr(cmd) => cmd.run().await?,
-        Command::Repo(cmd) => cmd.run().await?,
-        Command::Label(cmd) => cmd.run().await?,
-        Command::Milestone(cmd) => cmd.run().await?,
-        Command::Release(cmd) => cmd.run().await?,
-        Command::Project(cmd) => cmd.run().await?,
-        Command::Run(cmd) => cmd.run().await?,
-        Command::Org(cmd) => cmd.run().await?,
-        Command::Auth(cmd) => cmd.run().await?,
-        Command::Config(cmd) => cmd.run().await?,
-        Command::Browse(cmd) => cmd.run().await?,
-        Command::Api(cmd) => cmd.run().await?,
+    let result = match app.command {
+        Command::Issue(cmd) => cmd.run().await,
+        Command::Pr(cmd) => cmd.run().await,
+        Command::Repo(cmd) => cmd.run().await,
+        Command::Label(cmd) => cmd.run().await,
+        Command::Milestone(cmd) => cmd.run().await,
+        Command::Release(cmd) => cmd.run().await,
+        Command::Project(cmd) => cmd.run().await,
+        Command::Run(cmd) => cmd.run().await,
+        Command::Org(cmd) => cmd.run().await,
+        Command::Auth(cmd) => cmd.run().await,
+        Command::Config(cmd) => cmd.run().await,
+        Command::Browse(cmd) => cmd.run().await,
+        Command::Api(cmd) => cmd.run().await,
         Command::Completion(args) => {
             clap_complete::generate(
                 args.shell,
@@ -87,8 +87,18 @@ async fn main() -> eyre::Result<()> {
                 "gt",
                 &mut std::io::stdout(),
             );
+            Ok(())
+        }
+    };
+
+    if let Err(ref e) = result {
+        let msg = e.to_string();
+        if msg.starts_with("HTTP 401") {
+            eprintln!("hint: try `gt auth login`");
+        } else if msg.starts_with("HTTP 403") {
+            eprintln!("hint: you don't have permission for this operation");
         }
     }
 
-    Ok(())
+    result
 }

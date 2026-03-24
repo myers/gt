@@ -32,20 +32,59 @@ where
 }
 
 /// Errors from the Gitea API client.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum GiteaError {
-    /// Error from the underlying HTTP/API client.
-    #[error("API error: {0}")]
-    Api(#[from] progenitor_client::Error<types::ApiError>),
+    /// Error from the underlying HTTP/API client (progenitor typed endpoints).
+    Api(progenitor_client::Error<types::ApiError>),
+    /// Error from raw HTTP requests where we parsed the body ourselves.
+    RawApiError { status: u16, message: String },
     /// HTTP/reqwest error.
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     /// URL must use http or https scheme.
-    #[error("URL must use http:// or https:// scheme")]
     HttpRequired,
     /// Authentication key contains non-ASCII characters.
-    #[error("authentication key contains non-ASCII characters")]
     KeyNotAscii,
+}
+
+impl std::fmt::Display for GiteaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GiteaError::Api(e) => match e {
+                progenitor_client::Error::ErrorResponse(rv) => {
+                    let status = rv.status();
+                    let code = status.as_u16();
+                    let fallback = status.canonical_reason().unwrap_or("Error");
+                    let msg = rv.message.as_deref().unwrap_or(fallback);
+                    write!(f, "HTTP {code}: {msg}")
+                }
+                _ => write!(f, "{e}"),
+            },
+            GiteaError::RawApiError { status, message } => {
+                write!(f, "HTTP {status}: {message}")
+            }
+            GiteaError::Http(e) => write!(f, "{e}"),
+            GiteaError::HttpRequired => {
+                write!(f, "URL must use http:// or https:// scheme")
+            }
+            GiteaError::KeyNotAscii => {
+                write!(f, "authentication key contains non-ASCII characters")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GiteaError {}
+
+impl From<progenitor_client::Error<types::ApiError>> for GiteaError {
+    fn from(e: progenitor_client::Error<types::ApiError>) -> Self {
+        GiteaError::Api(e)
+    }
+}
+
+impl From<reqwest::Error> for GiteaError {
+    fn from(e: reqwest::Error) -> Self {
+        GiteaError::Http(e)
+    }
 }
 
 /// Method of authentication.
@@ -116,7 +155,20 @@ impl Gitea {
     pub async fn raw_get(&self, path: &str) -> Result<String, GiteaError> {
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
         let resp = self.reqwest_client.get(&url).send().await?;
-        let resp = resp.error_for_status()?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let reason = status.canonical_reason().unwrap_or("Error");
+            let message = parsed["message"]
+                .as_str()
+                .unwrap_or(reason)
+                .to_string();
+            return Err(GiteaError::RawApiError {
+                status: status.as_u16(),
+                message,
+            });
+        }
         Ok(resp.text().await?)
     }
 
