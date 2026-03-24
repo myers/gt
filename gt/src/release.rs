@@ -3,10 +3,14 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct ReleaseCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: ReleaseAction,
 }
@@ -27,13 +31,8 @@ enum ReleaseAction {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -57,20 +56,12 @@ struct CreateArgs {
     /// Mark as prerelease
     #[arg(long)]
     prerelease: bool,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ViewArgs {
     /// Release ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 
     /// Output as JSON
     #[arg(long)]
@@ -81,55 +72,58 @@ struct ViewArgs {
 struct DownloadArgs {
     /// Release ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct DeleteArgs {
     /// Release ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl ReleaseCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            ReleaseAction::List(args) => list_releases(args).await,
-            ReleaseAction::Create(args) => create_release(args).await,
-            ReleaseAction::View(args) => view_release(args).await,
-            ReleaseAction::Download(args) => download_release(args).await,
-            ReleaseAction::Delete(args) => delete_release(args).await,
+            ReleaseAction::List(args) => list_releases(&self.repo, args).await,
+            ReleaseAction::Create(args) => create_release(&self.repo, args).await,
+            ReleaseAction::View(args) => view_release(&self.repo, args).await,
+            ReleaseAction::Download(args) => download_release(&self.repo, args).await,
+            ReleaseAction::Delete(args) => delete_release(&self.repo, args).await,
         }
     }
 }
 
-async fn list_releases(args: &ListArgs) -> Result<()> {
+const RELEASE_FIELDS: &[&str] = &[
+    "id", "tag_name", "name", "body", "draft", "prerelease",
+    "created_at", "published_at", "url", "html_url", "tarball_url", "zipball_url",
+    "assets",
+];
+
+async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let releases = api
-        .repo_list_releases()
-        .owner(owner)
-        .repo(repo)
-        .page(1)
-        .limit(30)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let releases = paginate::paginate(200, 50, |page, per_page| {
+        let api = &api;
+        async move {
+            Ok(api
+                .repo_list_releases()
+                .owner(owner)
+                .repo(repo)
+                .page(page)
+                .limit(per_page)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&releases)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &releases, &RELEASE_FIELDS);
     }
 
     if releases.is_empty() {
@@ -177,11 +171,11 @@ async fn list_releases(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_release(args: &CreateArgs) -> Result<()> {
+async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let body_text = args.body.clone();
@@ -205,7 +199,7 @@ async fn create_release(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let id = release.id.unwrap_or(0);
@@ -214,11 +208,11 @@ async fn create_release(args: &CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn view_release(args: &ViewArgs) -> Result<()> {
+async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let rel = api
@@ -228,7 +222,7 @@ async fn view_release(args: &ViewArgs) -> Result<()> {
         .id(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -287,11 +281,11 @@ async fn view_release(args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
-async fn download_release(args: &DownloadArgs) -> Result<()> {
+async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let rel = api
@@ -301,7 +295,7 @@ async fn download_release(args: &DownloadArgs) -> Result<()> {
         .id(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if rel.assets.is_empty() {
@@ -345,11 +339,11 @@ async fn download_release(args: &DownloadArgs) -> Result<()> {
     Ok(())
 }
 
-async fn delete_release(args: &DeleteArgs) -> Result<()> {
+async fn delete_release(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     api.repo_delete_release()
@@ -358,7 +352,7 @@ async fn delete_release(args: &DeleteArgs) -> Result<()> {
         .id(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Release #{} deleted", args.id);
     Ok(())

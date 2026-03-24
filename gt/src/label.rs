@@ -3,10 +3,14 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::atty_check;
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct LabelCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: LabelAction,
 }
@@ -25,13 +29,8 @@ enum LabelAction {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -47,10 +46,6 @@ struct CreateArgs {
     /// Label description
     #[arg(short, long)]
     description: Option<String>,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -69,54 +64,53 @@ struct EditArgs {
     /// New description
     #[arg(short, long)]
     description: Option<String>,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct DeleteArgs {
     /// Label ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl LabelCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            LabelAction::List(args) => list_labels(args).await,
-            LabelAction::Create(args) => create_label(args).await,
-            LabelAction::Edit(args) => edit_label(args).await,
-            LabelAction::Delete(args) => delete_label(args).await,
+            LabelAction::List(args) => list_labels(&self.repo, args).await,
+            LabelAction::Create(args) => create_label(&self.repo, args).await,
+            LabelAction::Edit(args) => edit_label(&self.repo, args).await,
+            LabelAction::Delete(args) => delete_label(&self.repo, args).await,
         }
     }
 }
 
-async fn list_labels(args: &ListArgs) -> Result<()> {
+const LABEL_FIELDS: &[&str] = &["id", "name", "color", "description", "url"];
+
+async fn list_labels(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let labels = api
-        .issue_list_labels()
-        .owner(owner)
-        .repo(repo)
-        .page(1)
-        .limit(50)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let labels = paginate::paginate(200, 50, |page, per_page| {
+        let api = &api;
+        async move {
+            Ok(api
+                .issue_list_labels()
+                .owner(owner)
+                .repo(repo)
+                .page(page)
+                .limit(per_page)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&labels)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &labels, &LABEL_FIELDS);
     }
 
     if labels.is_empty() {
@@ -140,11 +134,11 @@ async fn list_labels(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_label(args: &CreateArgs) -> Result<()> {
+async fn create_label(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let description = args.description.clone();
@@ -161,7 +155,7 @@ async fn create_label(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let id = label.id.unwrap_or(0);
@@ -170,11 +164,11 @@ async fn create_label(args: &CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn edit_label(args: &EditArgs) -> Result<()> {
+async fn edit_label(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let name = args.name.clone();
@@ -199,17 +193,17 @@ async fn edit_label(args: &EditArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Label #{} updated", args.id);
     Ok(())
 }
 
-async fn delete_label(args: &DeleteArgs) -> Result<()> {
+async fn delete_label(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     api.issue_delete_label()
@@ -218,7 +212,7 @@ async fn delete_label(args: &DeleteArgs) -> Result<()> {
         .id(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Label #{} deleted", args.id);
     Ok(())

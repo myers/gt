@@ -3,10 +3,14 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct MilestoneCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: MilestoneAction,
 }
@@ -27,17 +31,12 @@ enum MilestoneAction {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
     /// Filter by state (open, closed, all)
     #[arg(short, long, default_value = "open")]
     state: String,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -49,20 +48,12 @@ struct CreateArgs {
     /// Milestone description
     #[arg(short, long)]
     description: Option<String>,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ViewArgs {
     /// Milestone ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 
     /// Output as JSON
     #[arg(long)]
@@ -73,31 +64,23 @@ struct ViewArgs {
 struct CloseArgs {
     /// Milestone ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ReopenArgs {
     /// Milestone ID
     id: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl MilestoneCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            MilestoneAction::List(args) => list_milestones(args).await,
-            MilestoneAction::Create(args) => create_milestone(args).await,
-            MilestoneAction::View(args) => view_milestone(args).await,
+            MilestoneAction::List(args) => list_milestones(&self.repo, args).await,
+            MilestoneAction::Create(args) => create_milestone(&self.repo, args).await,
+            MilestoneAction::View(args) => view_milestone(&self.repo, args).await,
             MilestoneAction::Close(args) => {
                 set_milestone_state(
-                    args.repo.as_deref(),
+                    self.repo.repo.as_deref(),
                     args.id,
                     gitea_api::types::StateType::Closed,
                 )
@@ -105,7 +88,7 @@ impl MilestoneCommand {
             }
             MilestoneAction::Reopen(args) => {
                 set_milestone_state(
-                    args.repo.as_deref(),
+                    self.repo.repo.as_deref(),
                     args.id,
                     gitea_api::types::StateType::Open,
                 )
@@ -115,34 +98,46 @@ impl MilestoneCommand {
     }
 }
 
-async fn list_milestones(args: &ListArgs) -> Result<()> {
+const MILESTONE_FIELDS: &[&str] = &[
+    "id", "title", "description", "state", "open_issues", "closed_issues",
+    "due_on", "created_at", "updated_at", "closed_at",
+];
+
+async fn list_milestones(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let mut req = api
-        .issue_get_milestones_list()
-        .owner(owner)
-        .repo(repo)
-        .page(1)
-        .limit(30);
-
+    // Validate state before paginating
     match args.state.as_str() {
-        "open" | "closed" | "all" => req = req.state(args.state.clone()),
+        "open" | "closed" | "all" => {}
         other => eyre::bail!("Invalid state: {other}. Use open, closed, or all"),
     }
 
-    let milestones = req
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let state_str = args.state.clone();
+    let milestones = paginate::paginate(200, 50, |page, per_page| {
+        let api = &api;
+        let state_str = &state_str;
+        async move {
+            Ok(api
+                .issue_get_milestones_list()
+                .owner(owner)
+                .repo(repo)
+                .page(page)
+                .limit(per_page)
+                .state(state_str.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&milestones)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &milestones, &MILESTONE_FIELDS);
     }
 
     if milestones.is_empty() {
@@ -182,11 +177,11 @@ async fn list_milestones(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_milestone(args: &CreateArgs) -> Result<()> {
+async fn create_milestone(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let description = args.description.clone();
@@ -203,7 +198,7 @@ async fn create_milestone(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let id = ms.id.unwrap_or(0);
@@ -212,11 +207,11 @@ async fn create_milestone(args: &CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn view_milestone(args: &ViewArgs) -> Result<()> {
+async fn view_milestone(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let ms = api
@@ -226,7 +221,7 @@ async fn view_milestone(args: &ViewArgs) -> Result<()> {
         .id(args.id.to_string())
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -280,7 +275,7 @@ async fn set_milestone_state(
         .body_map(|b| b.state(state.clone()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Milestone #{id} {state}");
     Ok(())

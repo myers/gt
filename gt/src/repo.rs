@@ -17,6 +17,14 @@ impl RepoInfo {
     }
 }
 
+/// Shared `-R`/`--repo` flag, added to parent commands with `global = true`.
+#[derive(clap::Args, Clone, Default, Debug)]
+pub struct RepoArgs {
+    /// Repository (owner/repo). Detected from git remote if omitted.
+    #[arg(short = 'R', long = "repo", global = true)]
+    pub repo: Option<String>,
+}
+
 /// Parse an "owner/repo" string into RepoInfo
 pub fn parse_repo(s: &str) -> Result<RepoInfo> {
     let parts: Vec<&str> = s.splitn(2, '/').collect();

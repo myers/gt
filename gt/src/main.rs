@@ -6,9 +6,11 @@ mod browse;
 mod config;
 mod config_cmd;
 mod issues;
+mod json;
 mod label;
 mod milestone;
 mod org;
+mod paginate;
 mod project;
 mod pulls;
 mod release;
@@ -56,6 +58,18 @@ enum Command {
 }
 
 #[derive(Args)]
+#[command(after_long_help = "\
+Install completions:
+
+  # bash
+  gt completion bash > ~/.local/share/bash-completion/completions/gt
+
+  # zsh (add fpath=(~/.zfunc $fpath) to .zshrc first)
+  gt completion zsh > ~/.zfunc/_gt
+
+  # fish
+  gt completion fish > ~/.config/fish/completions/gt.fish
+")]
 struct CompletionArgs {
     /// Shell to generate for (bash, zsh, fish, powershell, elvish)
     shell: clap_complete::Shell,

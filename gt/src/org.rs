@@ -3,6 +3,7 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::atty_check;
+use crate::paginate;
 
 #[derive(Args)]
 pub struct OrgCommand {
@@ -22,9 +23,8 @@ enum OrgAction {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -62,22 +62,32 @@ impl OrgCommand {
     }
 }
 
+const ORG_FIELDS: &[&str] = &[
+    "id", "name", "full_name", "description", "website", "location",
+    "avatar_url", "visibility",
+];
+
 async fn list_orgs(args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let orgs = api
-        .org_list_current_user_orgs()
-        .page(1)
-        .limit(50)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let orgs = paginate::paginate(200, 50, |page, per_page| {
+        let api = &api;
+        async move {
+            Ok(api
+                .org_list_current_user_orgs()
+                .page(page)
+                .limit(per_page)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&orgs)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &orgs, &ORG_FIELDS);
     }
 
     if orgs.is_empty() {
@@ -114,7 +124,7 @@ async fn view_org(args: &ViewArgs) -> Result<()> {
         .org(&args.name)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -172,7 +182,7 @@ async fn create_org(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let name = org.username.as_deref().unwrap_or("");

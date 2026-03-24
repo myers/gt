@@ -3,10 +3,14 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct RepoCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: RepoAction,
 }
@@ -27,10 +31,6 @@ enum RepoAction {
 
 #[derive(Args)]
 struct ViewArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -45,9 +45,8 @@ struct ListArgs {
     #[arg(short, long, default_value = "30")]
     limit: i64,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -79,7 +78,7 @@ struct ForkArgs {
 impl RepoCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            RepoAction::View(args) => view_repo(args).await,
+            RepoAction::View(args) => view_repo(&self.repo, args).await,
             RepoAction::List(args) => list_repos(args).await,
             RepoAction::Clone(args) => clone_repo(args).await,
             RepoAction::Create(args) => create_repo(args).await,
@@ -88,11 +87,11 @@ impl RepoCommand {
     }
 }
 
-async fn view_repo(args: &ViewArgs) -> Result<()> {
+async fn view_repo(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     let repo_data = api
         .repo_get()
@@ -100,7 +99,7 @@ async fn view_repo(args: &ViewArgs) -> Result<()> {
         .repo(&repo_info.name)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -134,32 +133,52 @@ async fn view_repo(args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
+const REPO_FIELDS: &[&str] = &[
+    "id", "name", "full_name", "description", "private", "fork", "archived",
+    "stars_count", "forks_count", "open_issues_count", "default_branch",
+    "created_at", "updated_at", "html_url", "clone_url", "ssh_url",
+];
+
 async fn list_repos(args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
     let repos = if let Some(ref owner) = args.owner {
-        api.user_list_repos()
-            .username(owner)
-            .page(1)
-            .limit(args.limit)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{e}"))?
-            .into_inner()
+        let owner = owner.as_str();
+        paginate::paginate(args.limit, 50, |page, per_page| {
+            let api = &api;
+            async move {
+                Ok(api
+                    .user_list_repos()
+                    .username(owner)
+                    .page(page)
+                    .limit(per_page)
+                    .send()
+                    .await
+                    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                    .into_inner())
+            }
+        })
+        .await?
     } else {
-        api.user_current_list_repos()
-            .page(1)
-            .limit(args.limit)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{e}"))?
-            .into_inner()
+        paginate::paginate(args.limit, 50, |page, per_page| {
+            let api = &api;
+            async move {
+                Ok(api
+                    .user_current_list_repos()
+                    .page(page)
+                    .limit(per_page)
+                    .send()
+                    .await
+                    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                    .into_inner())
+            }
+        })
+        .await?
     };
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&repos)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &repos, &REPO_FIELDS);
     }
 
     if repos.is_empty() {
@@ -228,7 +247,7 @@ async fn create_repo(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let full_name = repo_data.full_name.as_deref().unwrap_or("");
@@ -250,7 +269,7 @@ async fn fork_repo(args: &ForkArgs) -> Result<()> {
         .body_map(|b| b)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let full_name = forked.full_name.as_deref().unwrap_or("");

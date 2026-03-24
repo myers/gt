@@ -2,10 +2,14 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct IssueCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: IssueAction,
 }
@@ -42,25 +46,13 @@ struct EditArgs {
     /// New body
     #[arg(short, long)]
     body: Option<String>,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
-struct StatusArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-}
+struct StatusArgs {}
 
 #[derive(Args)]
 struct ListArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
     /// Filter by state
     #[arg(short, long, default_value = "open")]
     state: String,
@@ -69,19 +61,14 @@ struct ListArgs {
     #[arg(short, long, default_value = "30")]
     limit: i64,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
 struct ViewArgs {
     /// Issue number
     number: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 
     /// Show comments
     #[arg(short, long)]
@@ -102,10 +89,6 @@ struct CreateArgs {
     #[arg(short, long, default_value = "")]
     body: String,
 
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
     /// Labels (comma-separated names — looked up by name)
     #[arg(short, long)]
     label: Vec<String>,
@@ -119,20 +102,12 @@ struct CreateArgs {
 struct CloseArgs {
     /// Issue number
     number: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ReopenArgs {
     /// Issue number
     number: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -143,57 +118,65 @@ struct CommentArgs {
     /// Comment body
     #[arg(short, long)]
     body: String,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl IssueCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            IssueAction::List(args) => list_issues(args).await,
-            IssueAction::View(args) => view_issue(args).await,
-            IssueAction::Create(args) => create_issue(args).await,
-            IssueAction::Close(args) => set_issue_state(args.repo.as_deref(), args.number, "closed").await,
-            IssueAction::Reopen(args) => set_issue_state(args.repo.as_deref(), args.number, "open").await,
-            IssueAction::Comment(args) => comment_issue(args).await,
-            IssueAction::Edit(args) => edit_issue(args).await,
-            IssueAction::Status(args) => status_issues(args).await,
+            IssueAction::List(args) => list_issues(&self.repo, args).await,
+            IssueAction::View(args) => view_issue(&self.repo, args).await,
+            IssueAction::Create(args) => create_issue(&self.repo, args).await,
+            IssueAction::Close(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "closed").await,
+            IssueAction::Reopen(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "open").await,
+            IssueAction::Comment(args) => comment_issue(&self.repo, args).await,
+            IssueAction::Edit(args) => edit_issue(&self.repo, args).await,
+            IssueAction::Status(args) => status_issues(&self.repo, args).await,
         }
     }
 }
 
-async fn list_issues(args: &ListArgs) -> Result<()> {
+const ISSUE_FIELDS: &[&str] = &[
+    "number", "title", "state", "body", "labels", "assignees", "milestone",
+    "comments", "created_at", "updated_at", "closed_at", "due_date", "url",
+    "html_url", "user", "repository",
+];
+
+async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let mut req = api
-        .issue_list_issues()
-        .owner(owner)
-        .repo(repo)
-        .page(1)
-        .limit(args.limit);
-
+    // Validate state before paginating
     match args.state.as_str() {
-        "open" => req = req.state(gitea_api::types::IssueListIssuesState::Open),
-        "closed" => req = req.state(gitea_api::types::IssueListIssuesState::Closed),
-        "all" => {}
+        "open" | "closed" | "all" => {}
         other => eyre::bail!("Invalid state: {other}. Use open, closed, or all"),
     }
 
-    let issues = req
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let state_str = args.state.clone();
+    let issues = paginate::paginate(args.limit, 50, |page, per_page| {
+        let api = &api;
+        let state_str = &state_str;
+        async move {
+            let mut req = api
+                .issue_list_issues()
+                .owner(owner)
+                .repo(repo)
+                .page(page)
+                .limit(per_page);
+            match state_str.as_str() {
+                "open" => req = req.state(gitea_api::types::IssueListIssuesState::Open),
+                "closed" => req = req.state(gitea_api::types::IssueListIssuesState::Closed),
+                _ => {}
+            }
+            Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&issues)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &issues, &ISSUE_FIELDS);
     }
 
     if issues.is_empty() {
@@ -247,11 +230,11 @@ async fn list_issues(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn view_issue(args: &ViewArgs) -> Result<()> {
+async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let issue = api
@@ -261,7 +244,7 @@ async fn view_issue(args: &ViewArgs) -> Result<()> {
         .index(args.number)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -273,7 +256,7 @@ async fn view_issue(args: &ViewArgs) -> Result<()> {
                 .index(args.number)
                 .send()
                 .await
-                .map_err(|e| eyre::eyre!("{e}"))?
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
                 .into_inner();
             let combined = serde_json::json!({
                 "issue": issue,
@@ -344,7 +327,7 @@ async fn view_issue(args: &ViewArgs) -> Result<()> {
             .index(args.number)
             .send()
             .await
-            .map_err(|e| eyre::eyre!("{e}"))?
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
             .into_inner();
 
         if comments.is_empty() {
@@ -369,11 +352,11 @@ async fn view_issue(args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_issue(args: &CreateArgs) -> Result<()> {
+async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let issue = api
@@ -387,7 +370,7 @@ async fn create_issue(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let number = issue.number.unwrap_or(0);
@@ -411,17 +394,17 @@ async fn set_issue_state(repo_opt: Option<&str>, number: i64, state: &str) -> Re
         .body_map(|b| b.state(state.to_string()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Issue #{number} {state}");
     Ok(())
 }
 
-async fn comment_issue(args: &CommentArgs) -> Result<()> {
+async fn comment_issue(repo_args: &repo::RepoArgs, args: &CommentArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     api.issue_create_comment()
@@ -431,17 +414,17 @@ async fn comment_issue(args: &CommentArgs) -> Result<()> {
         .body_map(|b| b.body(args.body.clone()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Comment added to issue #{}", args.number);
     Ok(())
 }
 
-async fn edit_issue(args: &EditArgs) -> Result<()> {
+async fn edit_issue(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let mut builder = api.issue_edit_issue().owner(owner).repo(repo).index(args.number);
@@ -463,17 +446,17 @@ async fn edit_issue(args: &EditArgs) -> Result<()> {
     builder
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Issue #{} updated", args.number);
     Ok(())
 }
 
-async fn status_issues(args: &StatusArgs) -> Result<()> {
+async fn status_issues(repo_args: &repo::RepoArgs, _args: &StatusArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     // Show open issues assigned to the current user
@@ -486,7 +469,7 @@ async fn status_issues(args: &StatusArgs) -> Result<()> {
         .limit(20)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if issues.is_empty() {

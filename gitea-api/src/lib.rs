@@ -34,10 +34,8 @@ where
 /// Errors from the Gitea API client.
 #[derive(Debug)]
 pub enum GiteaError {
-    /// Error from the underlying HTTP/API client (progenitor typed endpoints).
-    Api(progenitor_client::Error<types::ApiError>),
-    /// Error from raw HTTP requests where we parsed the body ourselves.
-    RawApiError { status: u16, message: String },
+    /// API error with HTTP status code and message.
+    Api { status: u16, message: String },
     /// HTTP/reqwest error.
     Http(reqwest::Error),
     /// URL must use http or https scheme.
@@ -49,19 +47,7 @@ pub enum GiteaError {
 impl std::fmt::Display for GiteaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GiteaError::Api(e) => match e {
-                progenitor_client::Error::ErrorResponse(rv) => {
-                    let status = rv.status();
-                    let code = status.as_u16();
-                    let fallback = status.canonical_reason().unwrap_or("Error");
-                    let msg = rv.message.as_deref().unwrap_or(fallback);
-                    write!(f, "HTTP {code}: {msg}")
-                }
-                _ => write!(f, "{e}"),
-            },
-            GiteaError::RawApiError { status, message } => {
-                write!(f, "HTTP {status}: {message}")
-            }
+            GiteaError::Api { status, message } => write!(f, "HTTP {status}: {message}"),
             GiteaError::Http(e) => write!(f, "{e}"),
             GiteaError::HttpRequired => {
                 write!(f, "URL must use http:// or https:// scheme")
@@ -75,9 +61,22 @@ impl std::fmt::Display for GiteaError {
 
 impl std::error::Error for GiteaError {}
 
-impl From<progenitor_client::Error<types::ApiError>> for GiteaError {
-    fn from(e: progenitor_client::Error<types::ApiError>) -> Self {
-        GiteaError::Api(e)
+/// Extract a clean error from a progenitor error with any error body type.
+fn format_progenitor_error<E: std::fmt::Debug>(e: &progenitor_client::Error<E>) -> (u16, String) {
+    match e.status() {
+        Some(status) => {
+            let code = status.as_u16();
+            let reason = status.canonical_reason().unwrap_or("Error");
+            (code, reason.to_string())
+        }
+        None => (0, format!("{e}")),
+    }
+}
+
+impl<E: std::fmt::Debug> From<progenitor_client::Error<E>> for GiteaError {
+    fn from(e: progenitor_client::Error<E>) -> Self {
+        let (status, message) = format_progenitor_error(&e);
+        GiteaError::Api { status, message }
     }
 }
 
@@ -164,7 +163,7 @@ impl Gitea {
                 .as_str()
                 .unwrap_or(reason)
                 .to_string();
-            return Err(GiteaError::RawApiError {
+            return Err(GiteaError::Api {
                 status: status.as_u16(),
                 message,
             });

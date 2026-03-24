@@ -3,10 +3,14 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::paginate;
 use crate::repo;
 
 #[derive(Args)]
 pub struct PrCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: PrAction,
 }
@@ -39,10 +43,6 @@ enum PrAction {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-
     /// Filter by state (open, closed, all)
     #[arg(short, long, default_value = "open")]
     state: String,
@@ -51,19 +51,14 @@ struct ListArgs {
     #[arg(short, long, default_value = "30")]
     limit: i64,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
 struct ViewArgs {
     /// Pull request number
     number: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 
     /// Show comments
     #[arg(short, long)]
@@ -91,20 +86,12 @@ struct CreateArgs {
     /// Head branch (defaults to current branch)
     #[arg(long)]
     head: Option<String>,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct CheckoutArgs {
     /// PR number
     number: i64,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -119,26 +106,18 @@ struct MergeArgs {
     /// Delete branch after merge
     #[arg(short, long)]
     delete_branch: bool,
-
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct CloseArgs {
     /// PR number
     number: i64,
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ReopenArgs {
     /// PR number
     number: i64,
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -149,9 +128,6 @@ struct CommentArgs {
     /// Comment body
     #[arg(short, long)]
     body: String,
-
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -166,18 +142,12 @@ struct ReviewArgs {
     /// Review body/comment
     #[arg(short, long, default_value = "")]
     body: String,
-
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 #[derive(Args)]
 struct ChecksArgs {
     /// PR number
     number: i64,
-
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 
     /// Output as JSON
     #[arg(long)]
@@ -188,58 +158,69 @@ struct ChecksArgs {
 struct DiffArgs {
     /// PR number
     number: i64,
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl PrCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            PrAction::List(args) => list_prs(args).await,
-            PrAction::View(args) => view_pr(args).await,
-            PrAction::Create(args) => create_pr(args).await,
-            PrAction::Checkout(args) => checkout_pr(args).await,
-            PrAction::Merge(args) => merge_pr(args).await,
-            PrAction::Close(args) => set_pr_state(args.repo.as_deref(), args.number, "closed").await,
-            PrAction::Reopen(args) => set_pr_state(args.repo.as_deref(), args.number, "open").await,
-            PrAction::Comment(args) => comment_pr(args).await,
-            PrAction::Diff(args) => diff_pr(args).await,
-            PrAction::Review(args) => review_pr(args).await,
-            PrAction::Checks(args) => checks_pr(args).await,
+            PrAction::List(args) => list_prs(&self.repo, args).await,
+            PrAction::View(args) => view_pr(&self.repo, args).await,
+            PrAction::Create(args) => create_pr(&self.repo, args).await,
+            PrAction::Checkout(args) => checkout_pr(&self.repo, args).await,
+            PrAction::Merge(args) => merge_pr(&self.repo, args).await,
+            PrAction::Close(args) => set_pr_state(self.repo.repo.as_deref(), args.number, "closed").await,
+            PrAction::Reopen(args) => set_pr_state(self.repo.repo.as_deref(), args.number, "open").await,
+            PrAction::Comment(args) => comment_pr(&self.repo, args).await,
+            PrAction::Diff(args) => diff_pr(&self.repo, args).await,
+            PrAction::Review(args) => review_pr(&self.repo, args).await,
+            PrAction::Checks(args) => checks_pr(&self.repo, args).await,
         }
     }
 }
 
-async fn list_prs(args: &ListArgs) -> Result<()> {
+const PR_FIELDS: &[&str] = &[
+    "number", "title", "state", "body", "labels", "assignees", "milestone",
+    "head", "base", "merged", "merged_at", "mergeable", "comments",
+    "created_at", "updated_at", "closed_at", "url", "html_url", "user",
+    "diff_url", "patch_url",
+];
+
+async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let mut req = api
-        .repo_list_pull_requests()
-        .owner(owner)
-        .repo(repo)
-        .page(1)
-        .limit(args.limit);
-
+    // Validate state before paginating
     match args.state.as_str() {
-        "open" => req = req.state(gitea_api::types::RepoListPullRequestsState::Open),
-        "closed" => req = req.state(gitea_api::types::RepoListPullRequestsState::Closed),
-        "all" => {},
+        "open" | "closed" | "all" => {}
         other => eyre::bail!("Invalid state: {other}. Use open, closed, or all"),
     }
 
-    let prs = req
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{e}"))?
-        .into_inner();
+    let state_str = args.state.clone();
+    let prs = paginate::paginate(args.limit, 50, |page, per_page| {
+        let api = &api;
+        let state_str = &state_str;
+        async move {
+            let mut req = api
+                .repo_list_pull_requests()
+                .owner(owner)
+                .repo(repo)
+                .page(page as u64)
+                .limit(per_page);
+            match state_str.as_str() {
+                "open" => req = req.state(gitea_api::types::RepoListPullRequestsState::Open),
+                "closed" => req = req.state(gitea_api::types::RepoListPullRequestsState::Closed),
+                _ => {}
+            }
+            Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
+        }
+    })
+    .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&prs)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &prs, &PR_FIELDS);
     }
 
     if prs.is_empty() {
@@ -289,11 +270,11 @@ async fn list_prs(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn view_pr(args: &ViewArgs) -> Result<()> {
+async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let pr = api
@@ -303,7 +284,7 @@ async fn view_pr(args: &ViewArgs) -> Result<()> {
         .index(args.number)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -315,7 +296,7 @@ async fn view_pr(args: &ViewArgs) -> Result<()> {
                 .index(args.number)
                 .send()
                 .await
-                .map_err(|e| eyre::eyre!("{e}"))?
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
                 .into_inner();
             let combined = serde_json::json!({
                 "pr": pr,
@@ -412,7 +393,7 @@ async fn view_pr(args: &ViewArgs) -> Result<()> {
             .index(args.number)
             .send()
             .await
-            .map_err(|e| eyre::eyre!("{e}"))?
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
             .into_inner();
 
         if comments.is_empty() {
@@ -451,11 +432,11 @@ async fn view_pr(args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_pr(args: &CreateArgs) -> Result<()> {
+async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let head = match &args.head {
@@ -481,7 +462,7 @@ async fn create_pr(args: &CreateArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let number = pr.number.unwrap_or(0);
@@ -490,11 +471,11 @@ async fn create_pr(args: &CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn checkout_pr(args: &CheckoutArgs) -> Result<()> {
+async fn checkout_pr(repo_args: &repo::RepoArgs, args: &CheckoutArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let pr = api
@@ -504,7 +485,7 @@ async fn checkout_pr(args: &CheckoutArgs) -> Result<()> {
         .index(args.number)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let branch = pr
@@ -541,11 +522,11 @@ async fn checkout_pr(args: &CheckoutArgs) -> Result<()> {
     Ok(())
 }
 
-async fn merge_pr(args: &MergeArgs) -> Result<()> {
+async fn merge_pr(repo_args: &repo::RepoArgs, args: &MergeArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let do_method = match args.method.as_str() {
@@ -563,7 +544,7 @@ async fn merge_pr(args: &MergeArgs) -> Result<()> {
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("PR #{} merged ({do_method})", args.number);
     Ok(())
@@ -583,17 +564,17 @@ async fn set_pr_state(repo_opt: Option<&str>, number: i64, state: &str) -> Resul
         .body_map(|b| b.state(state.to_string()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("PR #{number} {state}");
     Ok(())
 }
 
-async fn comment_pr(args: &CommentArgs) -> Result<()> {
+async fn comment_pr(repo_args: &repo::RepoArgs, args: &CommentArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     api.issue_create_comment()
@@ -603,17 +584,17 @@ async fn comment_pr(args: &CommentArgs) -> Result<()> {
         .body_map(|b| b.body(args.body.clone()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Comment added to PR #{}", args.number);
     Ok(())
 }
 
-async fn review_pr(args: &ReviewArgs) -> Result<()> {
+async fn review_pr(repo_args: &repo::RepoArgs, args: &ReviewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     let event = match args.action.as_str() {
@@ -631,16 +612,16 @@ async fn review_pr(args: &ReviewArgs) -> Result<()> {
         .body_map(move |b| b.body(args.body.clone()).event(event.clone()))
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Review submitted on PR #{}: {action_str}", args.number);
     Ok(())
 }
 
-async fn checks_pr(args: &ChecksArgs) -> Result<()> {
+async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> {
     let config = Config::load()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     // Use reqwest to get commit statuses for the PR's head SHA
     let api = config.client()?;
@@ -651,7 +632,7 @@ async fn checks_pr(args: &ChecksArgs) -> Result<()> {
         .index(args.number)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     let sha = pr
@@ -668,7 +649,7 @@ async fn checks_pr(args: &ChecksArgs) -> Result<()> {
         .ref_(sha)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -692,11 +673,11 @@ async fn checks_pr(args: &ChecksArgs) -> Result<()> {
     Ok(())
 }
 
-async fn diff_pr(args: &DiffArgs) -> Result<()> {
+async fn diff_pr(repo_args: &repo::RepoArgs, args: &DiffArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
 
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     // The diff endpoint returns plain text, not JSON.
     // Use raw_get since the typed client expects JSON responses.
@@ -704,7 +685,7 @@ async fn diff_pr(args: &DiffArgs) -> Result<()> {
         "repos/{}/{}/pulls/{}.diff",
         repo_info.owner, repo_info.name, args.number,
     );
-    let text = api.raw_get(&path).await.map_err(|e| eyre::eyre!("{e}"))?;
+    let text = api.raw_get(&path).await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
     print!("{text}");
     Ok(())
 }

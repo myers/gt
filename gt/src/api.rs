@@ -209,7 +209,7 @@ impl ApiCommand {
         if let Some(ref expr) = self.jq_expr {
             // Simple jq-like field extraction: .field or .[].field
             let parsed: serde_json::Value = serde_json::from_str(text)?;
-            let results = jq_select(&parsed, expr)?;
+            let results = crate::json::jq_select(&parsed, expr)?;
             for r in results {
                 match r {
                     serde_json::Value::String(s) => println!("{s}"),
@@ -263,46 +263,6 @@ fn parse_typed_value(s: &str) -> Result<serde_json::Value> {
     Ok(serde_json::Value::String(s.to_string()))
 }
 
-/// Simple jq-like field selector.
-/// Supports: .field, .[].field, .field.nested, .[].field.nested
-fn jq_select(value: &serde_json::Value, expr: &str) -> Result<Vec<serde_json::Value>> {
-    let expr = expr.trim_start_matches('.');
-    if expr.is_empty() {
-        return Ok(vec![value.clone()]);
-    }
-
-    let parts: Vec<&str> = expr.splitn(2, '.').collect();
-    let (head, rest) = (parts[0], parts.get(1).copied());
-
-    if head == "[]" {
-        // Array iteration
-        if let Some(arr) = value.as_array() {
-            let mut results = Vec::new();
-            for item in arr {
-                if let Some(rest) = rest {
-                    results.extend(jq_select(item, &format!(".{rest}"))?);
-                } else {
-                    results.push(item.clone());
-                }
-            }
-            return Ok(results);
-        }
-        return Ok(vec![]);
-    }
-
-    // Object field access
-    if let Some(obj) = value.as_object() {
-        if let Some(field_value) = obj.get(head) {
-            if let Some(rest) = rest {
-                return jq_select(field_value, &format!(".{rest}"));
-            }
-            return Ok(vec![field_value.clone()]);
-        }
-    }
-
-    Ok(vec![])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,33 +286,5 @@ mod tests {
             parse_typed_value("hello").unwrap(),
             serde_json::json!("hello")
         );
-    }
-
-    #[test]
-    fn test_jq_select_field() {
-        let v = serde_json::json!({"name": "test", "id": 1});
-        let r = jq_select(&v, ".name").unwrap();
-        assert_eq!(r, vec![serde_json::json!("test")]);
-    }
-
-    #[test]
-    fn test_jq_select_array() {
-        let v = serde_json::json!([{"name": "a"}, {"name": "b"}]);
-        let r = jq_select(&v, ".[].name").unwrap();
-        assert_eq!(r, vec![serde_json::json!("a"), serde_json::json!("b")]);
-    }
-
-    #[test]
-    fn test_jq_select_nested() {
-        let v = serde_json::json!({"repo": {"name": "test"}});
-        let r = jq_select(&v, ".repo.name").unwrap();
-        assert_eq!(r, vec![serde_json::json!("test")]);
-    }
-
-    #[test]
-    fn test_jq_select_identity() {
-        let v = serde_json::json!({"a": 1});
-        let r = jq_select(&v, ".").unwrap();
-        assert_eq!(r, vec![v]);
     }
 }

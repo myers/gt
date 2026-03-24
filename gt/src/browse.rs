@@ -9,9 +9,8 @@ pub struct BrowseCommand {
     /// Issue or PR number to open, or empty for repo
     number: Option<i64>,
 
-    /// Repository (owner/repo). Detected from git remote if omitted.
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
 
     /// Open repository settings
     #[arg(long)]
@@ -21,7 +20,7 @@ pub struct BrowseCommand {
 impl BrowseCommand {
     pub async fn run(&self) -> Result<()> {
         let config = Config::load()?;
-        let repo_info = repo::resolve_repo(self.repo.as_deref(), &config.url)?;
+        let repo_info = repo::resolve_repo(self.repo.repo.as_deref(), &config.url)?;
 
         let base = format!(
             "{}/{}/{}",

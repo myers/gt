@@ -7,6 +7,9 @@ use crate::repo;
 
 #[derive(Args)]
 pub struct RunCommand {
+    #[command(flatten)]
+    pub repo: repo::RepoArgs,
+
     #[command(subcommand)]
     action: RunAction,
 }
@@ -23,17 +26,13 @@ enum RunAction {
 
 #[derive(Args)]
 struct ListArgs {
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
 struct ViewArgs {
     id: i64,
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -41,24 +40,28 @@ struct ViewArgs {
 #[derive(Args)]
 struct RerunArgs {
     id: i64,
-    #[arg(short = 'R', long)]
-    repo: Option<String>,
 }
 
 impl RunCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
-            RunAction::List(args) => list_runs(args).await,
-            RunAction::View(args) => view_run(args).await,
-            RunAction::Rerun(args) => rerun_run(args).await,
+            RunAction::List(args) => list_runs(&self.repo, args).await,
+            RunAction::View(args) => view_run(&self.repo, args).await,
+            RunAction::Rerun(args) => rerun_run(&self.repo, args).await,
         }
     }
 }
 
-async fn list_runs(args: &ListArgs) -> Result<()> {
+const RUN_FIELDS: &[&str] = &[
+    "id", "display_title", "status", "conclusion", "event", "head_branch",
+    "head_sha", "html_url", "started_at", "completed_at", "created_at",
+    "updated_at",
+];
+
+async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     let resp = api
         .get_workflow_runs()
@@ -68,12 +71,11 @@ async fn list_runs(args: &ListArgs) -> Result<()> {
         .limit(30)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &resp.workflow_runs, &RUN_FIELDS);
     }
 
     let runs = &resp.workflow_runs;
@@ -112,10 +114,10 @@ async fn list_runs(args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn view_run(args: &ViewArgs) -> Result<()> {
+async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     let run = api
         .get_workflow_run()
@@ -124,7 +126,7 @@ async fn view_run(args: &ViewArgs) -> Result<()> {
         .run(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
     if args.json {
@@ -152,10 +154,10 @@ async fn view_run(args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
-async fn rerun_run(args: &RerunArgs) -> Result<()> {
+async fn rerun_run(repo_args: &repo::RepoArgs, args: &RerunArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
-    let repo_info = repo::resolve_repo(args.repo.as_deref(), &config.url)?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
     api.rerun_workflow_run()
         .owner(&repo_info.owner)
@@ -163,7 +165,7 @@ async fn rerun_run(args: &RerunArgs) -> Result<()> {
         .run(args.id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{e}"))?;
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Rerun triggered for run #{}", args.id);
     Ok(())
