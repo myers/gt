@@ -11,7 +11,7 @@
 //!     Auth::Token("your-api-token"),
 //!     Url::parse("https://gitea.example.com")?,
 //! )?;
-//! let version = api.get_version().await?.into_inner();
+//! let version = api.get_version().send().await?.into_inner();
 //! println!("Gitea version: {}", version.version.unwrap_or_default());
 //! # Ok(())
 //! # }
@@ -76,6 +76,8 @@ impl Auth<'_> {
 /// Wrapper around the progenitor-generated [`Client`] that adds authentication.
 pub struct Gitea {
     client: Client,
+    reqwest_client: reqwest::Client,
+    base_url: String,
 }
 
 impl Gitea {
@@ -101,10 +103,72 @@ impl Gitea {
         }
         base_url.push_str("api/v1");
 
-        let client = Client::new_with_client(&base_url, reqwest_client);
-        Ok(Self { client })
+        let client = Client::new_with_client(&base_url, reqwest_client.clone());
+        Ok(Self {
+            client,
+            reqwest_client,
+            base_url,
+        })
+    }
+
+    /// Make a raw GET request to a Gitea API path (e.g., "repos/owner/repo/projects").
+    /// Auth headers are included automatically. Returns error on non-success status.
+    pub async fn raw_get(&self, path: &str) -> Result<String, GiteaError> {
+        let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
+        let resp = self.reqwest_client.get(&url).send().await?;
+        let resp = resp.error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
+    /// Make a raw request with method, path, and optional JSON body.
+    pub async fn raw_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, GiteaError> {
+        let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
+        let mut req = self.reqwest_client.request(method, &url);
+        if let Some(body) = body {
+            req = req.header("Content-Type", "application/json").json(body);
+        }
+        Ok(req.send().await?)
+    }
+
+    /// Make a fully customizable request. Used by `gt api` for arbitrary endpoints
+    /// with custom headers, methods, and bodies.
+    pub async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, GiteaError> {
+        let mut req = self.reqwest_client.request(method, url);
+        req = req.header("Accept", "application/json");
+        for (key, value) in headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+        if let Some(body) = body {
+            req = req.header("Content-Type", "application/json").json(body);
+        }
+        Ok(req.send().await?)
+    }
+
+    /// Build a full URL from an API path (prepends base_url).
+    pub fn url_for(&self, path: &str) -> String {
+        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    /// Get the base URL (e.g., "https://gitea.example.com/api/v1").
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 }
+
+// Re-export reqwest types that callers need
+pub use reqwest::Method;
+pub use reqwest::Response;
 
 impl std::ops::Deref for Gitea {
     type Target = Client;
