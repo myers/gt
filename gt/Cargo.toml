@@ -1,0 +1,23 @@
+[package]
+name = "gt"
+version = "0.1.0"
+edition = "2024"
+description = "Gitea CLI - like gh, but for Gitea"
+license = "MIT"
+
+[[bin]]
+name = "gt"
+path = "src/main.rs"
+
+[dependencies]
+gitea-api = { path = "../gitea-api" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+directories = "6"
+eyre = "0.6"
+color-eyre = "0.6"
+chrono = { version = "0.4", features = ["clock"] }
+url = "2"

@@ -1,0 +1,3 @@
+[workspace]
+members = ["gitea-api", "gt"]
+resolver = "2"
