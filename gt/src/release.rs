@@ -27,6 +27,12 @@ enum ReleaseAction {
     Download(DownloadArgs),
     /// Delete a release
     Delete(DeleteArgs),
+    /// Edit a release (title, body, draft, prerelease)
+    Edit(EditReleaseArgs),
+    /// Upload an asset to a release
+    Upload(UploadArgs),
+    /// Delete a release asset
+    DeleteAsset(DeleteAssetArgs),
 }
 
 #[derive(Args)]
@@ -80,6 +86,47 @@ struct DeleteArgs {
     id: i64,
 }
 
+#[derive(Args)]
+struct EditReleaseArgs {
+    /// Release ID
+    id: i64,
+
+    /// New title
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// New body/notes
+    #[arg(short, long)]
+    body: Option<String>,
+
+    /// Set draft status
+    #[arg(long)]
+    draft: Option<bool>,
+
+    /// Set prerelease status
+    #[arg(long)]
+    prerelease: Option<bool>,
+}
+
+#[derive(Args)]
+struct UploadArgs {
+    /// Release ID
+    id: i64,
+
+    /// File(s) to upload
+    #[arg(required = true)]
+    files: Vec<String>,
+}
+
+#[derive(Args)]
+struct DeleteAssetArgs {
+    /// Release ID
+    id: i64,
+
+    /// Asset ID
+    asset_id: i64,
+}
+
 impl ReleaseCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
@@ -88,6 +135,9 @@ impl ReleaseCommand {
             ReleaseAction::View(args) => view_release(&self.repo, args).await,
             ReleaseAction::Download(args) => download_release(&self.repo, args).await,
             ReleaseAction::Delete(args) => delete_release(&self.repo, args).await,
+            ReleaseAction::Edit(args) => edit_release(&self.repo, args).await,
+            ReleaseAction::Upload(args) => upload_assets(&self.repo, args).await,
+            ReleaseAction::DeleteAsset(args) => delete_asset(&self.repo, args).await,
         }
     }
 }
@@ -355,5 +405,115 @@ async fn delete_release(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Release #{} deleted", args.id);
+    Ok(())
+}
+
+async fn edit_release(repo_args: &repo::RepoArgs, args: &EditReleaseArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_edit_release()
+        .owner(owner)
+        .repo(repo)
+        .id(args.id)
+        .body_map(|mut b| {
+            if let Some(ref name) = args.name {
+                b = b.name(name.clone());
+            }
+            if let Some(ref body) = args.body {
+                b = b.body(body.clone());
+            }
+            if let Some(draft) = args.draft {
+                b = b.draft(draft);
+            }
+            if let Some(prerelease) = args.prerelease {
+                b = b.prerelease(prerelease);
+            }
+            b
+        })
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Updated release #{}", args.id);
+    Ok(())
+}
+
+async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    for file_path in &args.files {
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            eyre::bail!("File not found: {file_path}");
+        }
+
+        let filename = path
+            .file_name()
+            .ok_or_else(|| eyre::eyre!("Invalid filename: {file_path}"))?
+            .to_string_lossy()
+            .to_string();
+
+        let file_bytes = std::fs::read(path)?;
+
+        // Gitea expects multipart form upload — use raw reqwest
+        let url = api.url_for(&format!(
+            "repos/{owner}/{repo}/releases/{}/assets?name={filename}",
+            args.id
+        ));
+
+        let part = reqwest::multipart::Part::bytes(file_bytes).file_name(filename.clone());
+        let form = reqwest::multipart::Form::new().part("attachment", part);
+
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("token {}", config.token),
+            )
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let message = parsed["message"]
+                .as_str()
+                .unwrap_or(status.canonical_reason().unwrap_or("Error"));
+            eyre::bail!("HTTP {}: {message}", status.as_u16());
+        }
+
+        eprintln!("Uploaded {filename} to release #{}", args.id);
+    }
+
+    Ok(())
+}
+
+async fn delete_asset(repo_args: &repo::RepoArgs, args: &DeleteAssetArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_delete_release_attachment()
+        .owner(owner)
+        .repo(repo)
+        .id(args.id)
+        .attachment_id(args.asset_id)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Deleted asset #{} from release #{}", args.asset_id, args.id);
     Ok(())
 }
