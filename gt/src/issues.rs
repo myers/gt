@@ -34,6 +34,14 @@ enum IssueAction {
     Edit(EditArgs),
     /// Show status of relevant issues
     Status(StatusArgs),
+    /// Lock an issue (prevent non-collaborator comments)
+    Lock(LockArgs),
+    /// Unlock an issue
+    Unlock(UnlockArgs),
+    /// Pin an issue
+    Pin(PinArgs),
+    /// Unpin an issue
+    Unpin(UnpinArgs),
 }
 
 #[derive(Args)]
@@ -132,6 +140,34 @@ struct CommentArgs {
     body: String,
 }
 
+#[derive(Args)]
+struct LockArgs {
+    /// Issue number
+    number: i64,
+
+    /// Lock reason (e.g., "off-topic", "too heated", "resolved", "spam")
+    #[arg(short, long)]
+    reason: Option<String>,
+}
+
+#[derive(Args)]
+struct UnlockArgs {
+    /// Issue number
+    number: i64,
+}
+
+#[derive(Args)]
+struct PinArgs {
+    /// Issue number
+    number: i64,
+}
+
+#[derive(Args)]
+struct UnpinArgs {
+    /// Issue number
+    number: i64,
+}
+
 impl IssueCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
@@ -144,6 +180,10 @@ impl IssueCommand {
             IssueAction::Comment(args) => comment_issue(&self.repo, args).await,
             IssueAction::Edit(args) => edit_issue(&self.repo, args).await,
             IssueAction::Status(args) => status_issues(&self.repo, args).await,
+            IssueAction::Lock(args) => lock_issue(&self.repo, args).await,
+            IssueAction::Unlock(args) => unlock_issue(&self.repo, args).await,
+            IssueAction::Pin(args) => pin_issue(&self.repo, args).await,
+            IssueAction::Unpin(args) => unpin_issue(&self.repo, args).await,
         }
     }
 }
@@ -760,6 +800,84 @@ pub fn relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
 
 pub fn atty_check() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+async fn lock_issue(repo_args: &repo::RepoArgs, args: &LockArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.issue_lock_issue()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .body_map(|mut b| {
+            if let Some(ref reason) = args.reason {
+                b = b.lock_reason(reason.clone());
+            }
+            b
+        })
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Locked issue #{}", args.number);
+    Ok(())
+}
+
+async fn unlock_issue(repo_args: &repo::RepoArgs, args: &UnlockArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.issue_unlock_issue()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Unlocked issue #{}", args.number);
+    Ok(())
+}
+
+async fn pin_issue(repo_args: &repo::RepoArgs, args: &PinArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.pin_issue()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Pinned issue #{}", args.number);
+    Ok(())
+}
+
+async fn unpin_issue(repo_args: &repo::RepoArgs, args: &UnpinArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.unpin_issue()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Unpinned issue #{}", args.number);
+    Ok(())
 }
 
 #[cfg(test)]

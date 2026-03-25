@@ -25,6 +25,8 @@ enum LabelAction {
     Edit(EditArgs),
     /// Delete a label
     Delete(DeleteArgs),
+    /// Clone labels from another repository
+    Clone(CloneArgs),
 }
 
 #[derive(Args)]
@@ -72,6 +74,12 @@ struct DeleteArgs {
     id: i64,
 }
 
+#[derive(Args)]
+struct CloneArgs {
+    /// Source repository (owner/repo) to copy labels from
+    from: String,
+}
+
 impl LabelCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
@@ -79,6 +87,7 @@ impl LabelCommand {
             LabelAction::Create(args) => create_label(&self.repo, args).await,
             LabelAction::Edit(args) => edit_label(&self.repo, args).await,
             LabelAction::Delete(args) => delete_label(&self.repo, args).await,
+            LabelAction::Clone(args) => clone_labels(&self.repo, args).await,
         }
     }
 }
@@ -215,5 +224,88 @@ async fn delete_label(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<(
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Label #{} deleted", args.id);
+    Ok(())
+}
+
+async fn clone_labels(repo_args: &repo::RepoArgs, args: &CloneArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    // Parse source repo
+    let source = repo::parse_repo(&args.from)?;
+
+    // Resolve target repo
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (target_owner, target_repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    // Fetch labels from source
+    let source_labels = api
+        .issue_list_labels()
+        .owner(&source.owner)
+        .repo(&source.name)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    if source_labels.is_empty() {
+        eprintln!("No labels found in {}", args.from);
+        return Ok(());
+    }
+
+    // Fetch existing labels in target to avoid duplicates
+    let existing = api
+        .issue_list_labels()
+        .owner(target_owner)
+        .repo(target_repo)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    let existing_names: std::collections::HashSet<String> = existing
+        .iter()
+        .filter_map(|l| l.name.clone())
+        .collect();
+
+    let mut created = 0;
+    let mut skipped = 0;
+
+    for label in &source_labels {
+        let name = match &label.name {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+
+        if existing_names.contains(&name) {
+            skipped += 1;
+            continue;
+        }
+
+        let color = label.color.as_deref().unwrap_or("000000").to_string();
+        let desc = label.description.clone();
+
+        api.issue_create_label()
+            .owner(target_owner)
+            .repo(target_repo)
+            .body_map(|mut b| {
+                b = b.name(name.clone()).color(color.clone());
+                if let Some(ref d) = desc {
+                    b = b.description(d.clone());
+                }
+                b
+            })
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+        created += 1;
+    }
+
+    eprintln!(
+        "Cloned {created} label{} from {} ({skipped} already existed)",
+        if created == 1 { "" } else { "s" },
+        args.from,
+    );
     Ok(())
 }
