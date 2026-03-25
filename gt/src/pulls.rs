@@ -39,6 +39,10 @@ enum PrAction {
     Review(ReviewArgs),
     /// Show CI status for a pull request
     Checks(ChecksArgs),
+    /// Edit a pull request (title, body, labels, assignees, milestone)
+    Edit(EditArgs),
+    /// Update PR branch (merge base branch into head)
+    UpdateBranch(UpdateBranchArgs),
 }
 
 #[derive(Args)]
@@ -160,6 +164,38 @@ struct DiffArgs {
     number: i64,
 }
 
+#[derive(Args)]
+struct EditArgs {
+    /// PR number
+    number: i64,
+
+    /// New title
+    #[arg(short, long)]
+    title: Option<String>,
+
+    /// New body
+    #[arg(short, long)]
+    body: Option<String>,
+
+    /// Add labels (comma-separated names, looked up by name)
+    #[arg(short, long)]
+    label: Vec<String>,
+
+    /// Set assignees (comma-separated usernames, replaces existing)
+    #[arg(short, long)]
+    assignee: Vec<String>,
+
+    /// Set milestone (by name)
+    #[arg(short, long)]
+    milestone: Option<String>,
+}
+
+#[derive(Args)]
+struct UpdateBranchArgs {
+    /// PR number
+    number: i64,
+}
+
 impl PrCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
@@ -174,6 +210,8 @@ impl PrCommand {
             PrAction::Diff(args) => diff_pr(&self.repo, args).await,
             PrAction::Review(args) => review_pr(&self.repo, args).await,
             PrAction::Checks(args) => checks_pr(&self.repo, args).await,
+            PrAction::Edit(args) => edit_pr(&self.repo, args).await,
+            PrAction::UpdateBranch(args) => update_branch(&self.repo, args).await,
         }
     }
 }
@@ -687,5 +725,102 @@ async fn diff_pr(repo_args: &repo::RepoArgs, args: &DiffArgs) -> Result<()> {
     );
     let text = api.raw_get(&path).await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
     print!("{text}");
+    Ok(())
+}
+
+async fn edit_pr(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    // Resolve label names to IDs if provided
+    let label_ids = if args.label.is_empty() {
+        vec![]
+    } else {
+        let labels = api
+            .issue_list_labels()
+            .owner(owner)
+            .repo(repo)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner();
+
+        let mut ids = Vec::new();
+        for name in &args.label {
+            match labels.iter().find(|l| l.name.as_deref() == Some(name.as_str())) {
+                Some(l) => ids.push(l.id.unwrap_or(0)),
+                None => eyre::bail!("Label not found: {name}"),
+            }
+        }
+        ids
+    };
+
+    // Resolve milestone name to ID if provided
+    let milestone_id = if let Some(ref ms_name) = args.milestone {
+        let milestones = api
+            .issue_get_milestones_list()
+            .owner(owner)
+            .repo(repo)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner();
+        match milestones.iter().find(|m| m.title.as_deref() == Some(ms_name.as_str())) {
+            Some(m) => Some(m.id.unwrap_or(0)),
+            None => eyre::bail!("Milestone not found: {ms_name}"),
+        }
+    } else {
+        None
+    };
+
+    api.repo_edit_pull_request()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .body_map(|mut b| {
+            if let Some(ref title) = args.title {
+                b = b.title(title.clone());
+            }
+            if let Some(ref body) = args.body {
+                b = b.body(body.clone());
+            }
+            if !label_ids.is_empty() {
+                b = b.labels(label_ids.clone());
+            }
+            if !args.assignee.is_empty() {
+                b = b.assignees(args.assignee.clone());
+            }
+            if let Some(ms) = milestone_id {
+                b = b.milestone(ms);
+            }
+            b
+        })
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Updated PR #{}", args.number);
+    Ok(())
+}
+
+async fn update_branch(repo_args: &repo::RepoArgs, args: &UpdateBranchArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_update_pull_request()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Updated branch for PR #{}", args.number);
     Ok(())
 }

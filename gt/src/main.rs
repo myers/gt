@@ -12,6 +12,7 @@ mod milestone;
 mod org;
 mod paginate;
 mod project;
+mod prompt;
 mod pulls;
 mod release;
 mod repo;

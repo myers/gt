@@ -22,6 +22,8 @@ enum IssueAction {
     View(ViewArgs),
     /// Create an issue
     Create(CreateArgs),
+    /// Delete an issue (admin only)
+    Delete(DeleteArgs),
     /// Close an issue
     Close(CloseArgs),
     /// Reopen an issue
@@ -81,13 +83,13 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Issue title
+    /// Issue title (omit for interactive mode)
     #[arg(short, long)]
-    title: String,
+    title: Option<String>,
 
     /// Issue body
-    #[arg(short, long, default_value = "")]
-    body: String,
+    #[arg(short, long)]
+    body: Option<String>,
 
     /// Labels (comma-separated names — looked up by name)
     #[arg(short, long)]
@@ -96,6 +98,12 @@ struct CreateArgs {
     /// Assignees (comma-separated usernames)
     #[arg(short, long)]
     assignee: Vec<String>,
+}
+
+#[derive(Args)]
+struct DeleteArgs {
+    /// Issue number
+    number: i64,
 }
 
 #[derive(Args)]
@@ -126,6 +134,7 @@ impl IssueCommand {
             IssueAction::List(args) => list_issues(&self.repo, args).await,
             IssueAction::View(args) => view_issue(&self.repo, args).await,
             IssueAction::Create(args) => create_issue(&self.repo, args).await,
+            IssueAction::Delete(args) => delete_issue(&self.repo, args).await,
             IssueAction::Close(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "closed").await,
             IssueAction::Reopen(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "open").await,
             IssueAction::Comment(args) => comment_issue(&self.repo, args).await,
@@ -352,6 +361,15 @@ async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
+/// Collected inputs for creating an issue (from flags or interactive prompts).
+struct IssueInput {
+    title: String,
+    body: String,
+    label_ids: Vec<i64>,
+    assignees: Vec<String>,
+    milestone_id: Option<i64>,
+}
+
 async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
@@ -359,14 +377,42 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    let input = if let Some(ref title) = args.title {
+        // Non-interactive: resolve label names to IDs
+        let label_ids = if args.label.is_empty() {
+            vec![]
+        } else {
+            resolve_label_ids(&api, owner, repo, &args.label).await?
+        };
+        IssueInput {
+            title: title.clone(),
+            body: args.body.clone().unwrap_or_default(),
+            label_ids,
+            assignees: args.assignee.clone(),
+            milestone_id: None,
+        }
+    } else {
+        // Interactive
+        if !atty_check() {
+            eyre::bail!("provide --title when not running interactively");
+        }
+        interactive_create_issue(&api, owner, repo).await?
+    };
+
     let issue = api
         .issue_create_issue()
         .owner(owner)
         .repo(repo)
-        .body_map(|b| {
-            b.title(args.title.clone())
-                .body(args.body.clone())
-                .assignees(args.assignee.clone())
+        .body_map(|mut b| {
+            b = b
+                .title(input.title.clone())
+                .body(input.body.clone())
+                .assignees(input.assignees.clone())
+                .labels(input.label_ids.clone());
+            if let Some(ms) = input.milestone_id {
+                b = b.milestone(ms);
+            }
+            b
         })
         .send()
         .await
@@ -377,6 +423,172 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     let url = issue.html_url.as_deref().unwrap_or("");
     eprintln!("Created issue #{number}: {url}");
 
+    Ok(())
+}
+
+/// Resolve label names to IDs by fetching labels from the repo.
+async fn resolve_label_ids(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    names: &[String],
+) -> Result<Vec<i64>> {
+    let labels = api
+        .issue_list_labels()
+        .owner(owner)
+        .repo(repo)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    let mut ids = Vec::new();
+    for name in names {
+        let found = labels
+            .iter()
+            .find(|l| l.name.as_deref() == Some(name.as_str()));
+        match found {
+            Some(l) => ids.push(l.id.unwrap_or(0)),
+            None => eyre::bail!("Label not found: {name}"),
+        }
+    }
+    Ok(ids)
+}
+
+/// Interactive issue creation flow (gh-style).
+async fn interactive_create_issue(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+) -> Result<IssueInput> {
+    // 1. Title (required)
+    let title = inquire::Text::new("Title:")
+        .with_validator(|s: &str| {
+            if s.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid("Title is required".into()))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+
+    // 2. Body via editor
+    let body = crate::prompt::edit_body("")?;
+
+    // 3. What's next?
+    let action = inquire::Select::new("What's next?", vec!["Submit", "Add metadata", "Cancel"])
+        .prompt()?;
+
+    let mut label_ids = Vec::new();
+    let mut assignees = Vec::new();
+    let mut milestone_id = None;
+
+    if action == "Cancel" {
+        eyre::bail!("Cancelled");
+    }
+
+    if action == "Add metadata" {
+        let choices = inquire::MultiSelect::new(
+            "What would you like to add?",
+            vec!["Labels", "Assignees", "Milestone"],
+        )
+        .prompt()?;
+
+        if choices.contains(&"Labels") {
+            let api_labels = api
+                .issue_list_labels()
+                .owner(owner)
+                .repo(repo)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner();
+
+            let label_options: Vec<(String, i64)> = api_labels
+                .iter()
+                .filter_map(|l| Some((l.name.clone()?, l.id?)))
+                .collect();
+
+            if label_options.is_empty() {
+                eprintln!("No labels found in this repository.");
+            } else {
+                let names: Vec<&str> = label_options.iter().map(|(n, _)| n.as_str()).collect();
+                let selected = inquire::MultiSelect::new("Labels:", names).prompt()?;
+                for name in selected {
+                    if let Some((_, id)) = label_options.iter().find(|(n, _)| n == name) {
+                        label_ids.push(*id);
+                    }
+                }
+            }
+        }
+
+        if choices.contains(&"Assignees") {
+            let input = inquire::Text::new("Assignees (comma-separated usernames):").prompt()?;
+            assignees = input
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
+        if choices.contains(&"Milestone") {
+            let api_milestones = api
+                .issue_get_milestones_list()
+                .owner(owner)
+                .repo(repo)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner();
+
+            let ms_options: Vec<(String, i64)> = api_milestones
+                .iter()
+                .filter_map(|m| Some((m.title.clone()?, m.id?)))
+                .collect();
+
+            if ms_options.is_empty() {
+                eprintln!("No milestones found in this repository.");
+            } else {
+                let names: Vec<&str> = ms_options.iter().map(|(n, _)| n.as_str()).collect();
+                let selected = inquire::Select::new("Milestone:", names).prompt()?;
+                if let Some((_, id)) = ms_options.iter().find(|(n, _)| n == selected) {
+                    milestone_id = Some(*id);
+                }
+            }
+        }
+
+        // Confirm after metadata
+        let confirm = inquire::Select::new("What's next?", vec!["Submit", "Cancel"]).prompt()?;
+        if confirm == "Cancel" {
+            eyre::bail!("Cancelled");
+        }
+    }
+
+    Ok(IssueInput {
+        title,
+        body,
+        label_ids,
+        assignees,
+        milestone_id,
+    })
+}
+
+async fn delete_issue(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.issue_delete()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Deleted issue #{}", args.number);
     Ok(())
 }
 
