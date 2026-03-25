@@ -43,13 +43,13 @@ struct ListArgs {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Tag name
+    /// Tag name (omit for interactive mode)
     #[arg(short, long)]
-    tag: String,
+    tag: Option<String>,
 
-    /// Release title
+    /// Release title (defaults to tag name)
     #[arg(short, long)]
-    name: String,
+    name: Option<String>,
 
     /// Release body/notes
     #[arg(short, long)]
@@ -228,9 +228,15 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let body_text = args.body.clone();
-    let draft = args.draft;
-    let prerelease = args.prerelease;
+    let (tag, name, body_text, draft, prerelease) = if let Some(ref tag) = args.tag {
+        let name = args.name.clone().unwrap_or_else(|| tag.clone());
+        (tag.clone(), name, args.body.clone(), args.draft, args.prerelease)
+    } else {
+        if !atty_check() {
+            eyre::bail!("provide --tag when not running interactively");
+        }
+        interactive_create_release()?
+    };
 
     let release = api
         .repo_create_release()
@@ -238,12 +244,12 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
         .repo(repo)
         .body_map(|mut b| {
             b = b
-                .tag_name(args.tag.clone())
-                .name(args.name.clone())
+                .tag_name(tag.clone())
+                .name(name.clone())
                 .draft(draft)
                 .prerelease(prerelease);
-            if let Some(body) = body_text {
-                b = b.body(body);
+            if let Some(ref body) = body_text {
+                b = b.body(body.clone());
             }
             b
         })
@@ -256,6 +262,35 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     let url = release.html_url.as_deref().unwrap_or("");
     eprintln!("Created release #{id}: {url}");
     Ok(())
+}
+
+fn interactive_create_release() -> Result<(String, String, Option<String>, bool, bool)> {
+    let tag = inquire::Text::new("Tag name:")
+        .with_validator(|s: &str| {
+            if s.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid("Tag is required".into()))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+
+    let name = inquire::Text::new("Release title:")
+        .with_default(&tag)
+        .prompt()?;
+
+    let body = crate::prompt::edit_body("")?;
+    let body_opt = if body.is_empty() { None } else { Some(body) };
+
+    let draft = inquire::Confirm::new("Draft?").with_default(false).prompt()?;
+    let prerelease = inquire::Confirm::new("Prerelease?").with_default(false).prompt()?;
+
+    let action = inquire::Select::new("What's next?", vec!["Submit", "Cancel"]).prompt()?;
+    if action == "Cancel" {
+        eyre::bail!("Cancelled");
+    }
+
+    Ok((tag, name, body_opt, draft, prerelease))
 }
 
 async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {

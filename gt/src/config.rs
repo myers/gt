@@ -10,6 +10,8 @@ struct ConfigFile {
     default: ConfigProfile,
     #[serde(default)]
     servers: HashMap<String, ConfigProfile>,
+    #[serde(default)]
+    aliases: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -109,6 +111,61 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn config_dir() -> Option<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "gt")?;
     Some(dirs.config_dir().to_path_buf())
+}
+
+/// Load aliases from config file. Returns empty map if no config or no aliases.
+pub fn load_aliases() -> HashMap<String, String> {
+    load_config_file()
+        .map(|c| c.aliases)
+        .unwrap_or_default()
+}
+
+/// Ensure config directory and file exist, returning the path.
+fn ensure_config_file() -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "gt")
+        .ok_or_else(|| eyre::eyre!("Cannot determine config directory"))?;
+    let dir = dirs.config_dir();
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("config.toml");
+    if !path.exists() {
+        std::fs::write(&path, "")?;
+    }
+    Ok(path)
+}
+
+/// Set an alias in the config file.
+pub fn set_alias(name: &str, expansion: &str) -> Result<()> {
+    let path = ensure_config_file()?;
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml::Table = content.parse().unwrap_or_default();
+
+    let aliases = doc
+        .entry("aliases")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(t) = aliases {
+        t.insert(name.to_string(), toml::Value::String(expansion.to_string()));
+    }
+
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
+}
+
+/// Delete an alias from the config file.
+pub fn delete_alias(name: &str) -> Result<bool> {
+    let path = ensure_config_file()?;
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml::Table = content.parse().unwrap_or_default();
+
+    let removed = if let Some(toml::Value::Table(t)) = doc.get_mut("aliases") {
+        t.remove(name).is_some()
+    } else {
+        false
+    };
+
+    if removed {
+        std::fs::write(&path, doc.to_string())?;
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

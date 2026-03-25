@@ -1,5 +1,6 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
+mod alias;
 mod api;
 mod auth;
 mod body;
@@ -24,6 +25,7 @@ mod run;
 mod search;
 mod secret;
 mod ssh_key;
+mod status;
 mod variable;
 mod workflow;
 
@@ -68,6 +70,10 @@ enum Command {
     SshKey(ssh_key::SshKeyCommand),
     /// Manage your GPG keys
     GpgKey(gpg_key::GpgKeyCommand),
+    /// Manage command aliases
+    Alias(alias::AliasCommand),
+    /// Show status dashboard (notifications, assigned, review requests)
+    Status(status::StatusCommand),
     /// Authentication commands
     Auth(auth::AuthCommand),
     /// Manage configuration
@@ -101,8 +107,29 @@ struct CompletionArgs {
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     color_eyre::install()?;
-    let app = App::parse();
 
+    // Check for alias expansion before clap parsing
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() > 1 {
+        let aliases = config::load_aliases();
+        if let Some(expansion) = aliases.get(&raw_args[1]) {
+            if let Some(shell_cmd) = expansion.strip_prefix('!') {
+                return alias::run_shell_alias(shell_cmd, &raw_args[2..]);
+            }
+            // Regular alias: expand and re-parse
+            let expanded = alias::expand_alias(expansion, &raw_args[2..]);
+            let mut full_args = vec!["gt".to_string()];
+            full_args.extend(expanded);
+            let app = App::parse_from(full_args);
+            return run_app(app).await;
+        }
+    }
+
+    let app = App::parse();
+    run_app(app).await
+}
+
+async fn run_app(app: App) -> eyre::Result<()> {
     let result = match app.command {
         Command::Issue(cmd) => cmd.run().await,
         Command::Pr(cmd) => cmd.run().await,
@@ -120,6 +147,8 @@ async fn main() -> eyre::Result<()> {
         Command::Org(cmd) => cmd.run().await,
         Command::SshKey(cmd) => cmd.run().await,
         Command::GpgKey(cmd) => cmd.run().await,
+        Command::Alias(cmd) => cmd.run().await,
+        Command::Status(cmd) => cmd.run().await,
         Command::Auth(cmd) => cmd.run().await,
         Command::Config(cmd) => cmd.run().await,
         Command::Browse(cmd) => cmd.run().await,
