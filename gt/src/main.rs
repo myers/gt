@@ -6,6 +6,7 @@ mod body;
 mod browse;
 mod config;
 mod config_cmd;
+mod gpg_key;
 mod issues;
 mod json;
 mod label;
@@ -22,6 +23,7 @@ mod repo_cmd;
 mod run;
 mod search;
 mod secret;
+mod ssh_key;
 mod variable;
 
 #[derive(Parser)]
@@ -59,6 +61,10 @@ enum Command {
     Notification(notification::NotificationCommand),
     /// Manage organizations
     Org(org::OrgCommand),
+    /// Manage your SSH keys
+    SshKey(ssh_key::SshKeyCommand),
+    /// Manage your GPG keys
+    GpgKey(gpg_key::GpgKeyCommand),
     /// Authentication commands
     Auth(auth::AuthCommand),
     /// Manage configuration
@@ -108,6 +114,8 @@ async fn main() -> eyre::Result<()> {
         Command::Variable(cmd) => cmd.run().await,
         Command::Notification(cmd) => cmd.run().await,
         Command::Org(cmd) => cmd.run().await,
+        Command::SshKey(cmd) => cmd.run().await,
+        Command::GpgKey(cmd) => cmd.run().await,
         Command::Auth(cmd) => cmd.run().await,
         Command::Config(cmd) => cmd.run().await,
         Command::Browse(cmd) => cmd.run().await,
