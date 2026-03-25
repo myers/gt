@@ -25,6 +25,7 @@ mod search;
 mod secret;
 mod ssh_key;
 mod variable;
+mod workflow;
 
 #[derive(Parser)]
 #[command(name = "gt", about = "Gitea CLI", version)]
@@ -59,6 +60,8 @@ enum Command {
     Variable(variable::VariableCommand),
     /// Manage notifications
     Notification(notification::NotificationCommand),
+    /// Manage Actions workflows
+    Workflow(workflow::WorkflowCommand),
     /// Manage organizations
     Org(org::OrgCommand),
     /// Manage your SSH keys
@@ -113,6 +116,7 @@ async fn main() -> eyre::Result<()> {
         Command::Secret(cmd) => cmd.run().await,
         Command::Variable(cmd) => cmd.run().await,
         Command::Notification(cmd) => cmd.run().await,
+        Command::Workflow(cmd) => cmd.run().await,
         Command::Org(cmd) => cmd.run().await,
         Command::SshKey(cmd) => cmd.run().await,
         Command::GpgKey(cmd) => cmd.run().await,
