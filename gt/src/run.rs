@@ -22,6 +22,10 @@ enum RunAction {
     View(ViewArgs),
     /// Rerun a workflow run
     Rerun(RerunArgs),
+    /// Watch a workflow run (poll until complete, show logs)
+    Watch(WatchArgs),
+    /// Download artifacts from a workflow run
+    Download(DownloadArgs),
 }
 
 #[derive(Args)]
@@ -42,12 +46,34 @@ struct RerunArgs {
     id: i64,
 }
 
+#[derive(Args)]
+struct WatchArgs {
+    /// Run ID
+    id: i64,
+
+    /// Poll interval in seconds
+    #[arg(short, long, default_value = "5")]
+    interval: u64,
+}
+
+#[derive(Args)]
+struct DownloadArgs {
+    /// Run ID
+    id: i64,
+
+    /// Output directory (defaults to current directory)
+    #[arg(short, long, default_value = ".")]
+    dir: String,
+}
+
 impl RunCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             RunAction::List(args) => list_runs(&self.repo, args).await,
             RunAction::View(args) => view_run(&self.repo, args).await,
             RunAction::Rerun(args) => rerun_run(&self.repo, args).await,
+            RunAction::Watch(args) => watch_run(&self.repo, args).await,
+            RunAction::Download(args) => download_artifacts(&self.repo, args).await,
         }
     }
 }
@@ -168,5 +194,127 @@ async fn rerun_run(repo_args: &repo::RepoArgs, args: &RerunArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Rerun triggered for run #{}", args.id);
+    Ok(())
+}
+
+async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    loop {
+        let run = api
+            .get_workflow_run()
+            .owner(owner)
+            .repo(repo)
+            .run(args.id)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner();
+
+        let title = run.display_title.as_deref().unwrap_or("(unnamed)");
+        let status = run.status.as_deref().unwrap_or("unknown");
+        let conclusion = run.conclusion.as_deref().unwrap_or("");
+
+        // Fetch jobs for this run
+        let jobs_resp = api
+            .raw_get(&format!("repos/{owner}/{repo}/actions/runs/{}/jobs", args.id))
+            .await
+            .map_err(|e| eyre::eyre!("{e}"))?;
+        let jobs: serde_json::Value = serde_json::from_str(&jobs_resp)?;
+
+        // Clear screen and show status
+        eprint!("\x1b[2J\x1b[H");
+        eprintln!("Run #{} — {title}", args.id);
+        eprintln!("Status: {status}{}\n", if conclusion.is_empty() { String::new() } else { format!(" ({conclusion})") });
+
+        if let Some(job_list) = jobs.get("jobs").and_then(|j| j.as_array()) {
+            for job in job_list {
+                let name = job["name"].as_str().unwrap_or("?");
+                let jstatus = job["status"].as_str().unwrap_or("?");
+                let jconclusion = job["conclusion"].as_str().unwrap_or("");
+                let icon = match (jstatus, jconclusion) {
+                    (_, "success") => "✓",
+                    (_, "failure") => "✗",
+                    (_, "cancelled") => "⊘",
+                    ("running", _) | ("in_progress", _) => "●",
+                    ("waiting", _) | ("queued", _) => "○",
+                    _ => "?",
+                };
+                eprintln!("  {icon} {name} — {jstatus}{}", if jconclusion.is_empty() { String::new() } else { format!(" ({jconclusion})") });
+            }
+        }
+
+        // Check if done
+        match status {
+            "completed" | "cancelled" | "failure" | "success" => {
+                eprintln!("\nRun completed with status: {status}{}", if conclusion.is_empty() { String::new() } else { format!(" ({conclusion})") });
+                if conclusion == "failure" {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        eprintln!("\nRefreshing in {}s...", args.interval);
+        tokio::time::sleep(std::time::Duration::from_secs(args.interval)).await;
+    }
+}
+
+async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    // List artifacts for this run
+    let resp = api
+        .raw_get(&format!("repos/{owner}/{repo}/actions/runs/{}/artifacts", args.id))
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    let data: serde_json::Value = serde_json::from_str(&resp)?;
+
+    let artifacts = data
+        .get("artifacts")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| eyre::eyre!("No artifacts found for run #{}", args.id))?;
+
+    if artifacts.is_empty() {
+        eprintln!("No artifacts found for run #{}", args.id);
+        return Ok(());
+    }
+
+    let out_dir = std::path::Path::new(&args.dir);
+    std::fs::create_dir_all(out_dir)?;
+
+    for artifact in artifacts {
+        let name = artifact["name"].as_str().unwrap_or("artifact");
+        let artifact_id = artifact["id"]
+            .as_i64()
+            .ok_or_else(|| eyre::eyre!("Artifact missing ID"))?;
+
+        let download_path = format!(
+            "repos/{owner}/{repo}/actions/artifacts/{artifact_id}"
+        );
+        let resp = api
+            .raw_request(gitea_api::Method::GET, &download_path, None)
+            .await
+            .map_err(|e| eyre::eyre!("{e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            eyre::bail!("Failed to download {name}: HTTP {}", status.as_u16());
+        }
+
+        let bytes = resp.bytes().await?;
+        let filename = format!("{name}.zip");
+        let dest = out_dir.join(&filename);
+        std::fs::write(&dest, &bytes)?;
+        eprintln!("Downloaded {filename} ({} bytes)", bytes.len());
+    }
+
     Ok(())
 }

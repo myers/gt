@@ -75,13 +75,13 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// PR title
+    /// PR title (omit for interactive mode)
     #[arg(short, long)]
-    title: String,
+    title: Option<String>,
 
     /// PR body
-    #[arg(short, long, default_value = "")]
-    body: String,
+    #[arg(short, long)]
+    body: Option<String>,
 
     /// Base branch (defaults to repo default branch)
     #[arg(long, default_value = "main")]
@@ -470,6 +470,14 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
+fn detect_current_branch() -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|_| eyre::eyre!("Failed to detect current branch"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
@@ -479,13 +487,17 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
 
     let head = match &args.head {
         Some(h) => h.clone(),
-        None => {
-            let output = std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
-                .map_err(|_| eyre::eyre!("Failed to detect current branch"))?;
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        None => detect_current_branch()?,
+    };
+
+    let (title, body) = if let Some(ref title) = args.title {
+        (title.clone(), args.body.clone().unwrap_or_default())
+    } else {
+        // Interactive mode
+        if !atty_check() {
+            eyre::bail!("provide --title when not running interactively");
         }
+        interactive_create_pr(&head, &args.base)?
     };
 
     let pr = api
@@ -493,8 +505,8 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
         .owner(owner)
         .repo(repo)
         .body_map(|b| {
-            b.title(args.title.clone())
-                .body(args.body.clone())
+            b.title(title.clone())
+                .body(body.clone())
                 .base(args.base.clone())
                 .head(head.clone())
         })
@@ -507,6 +519,29 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
     let url = pr.html_url.as_deref().unwrap_or("");
     eprintln!("Created PR #{number}: {url}");
     Ok(())
+}
+
+fn interactive_create_pr(head: &str, base: &str) -> Result<(String, String)> {
+    eprintln!("Creating PR: {head} → {base}\n");
+
+    let title = inquire::Text::new("Title:")
+        .with_validator(|s: &str| {
+            if s.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid("Title is required".into()))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+
+    let body = crate::prompt::edit_body("")?;
+
+    let action = inquire::Select::new("What's next?", vec!["Submit", "Cancel"]).prompt()?;
+    if action == "Cancel" {
+        eyre::bail!("Cancelled");
+    }
+
+    Ok((title, body))
 }
 
 async fn checkout_pr(repo_args: &repo::RepoArgs, args: &CheckoutArgs) -> Result<()> {
