@@ -27,6 +27,18 @@ enum RepoAction {
     Create(CreateArgs),
     /// Fork a repository
     Fork(ForkArgs),
+    /// Delete a repository
+    Delete(DeleteRepoArgs),
+    /// Edit repository settings
+    Edit(EditRepoArgs),
+    /// Archive a repository
+    Archive(ArchiveArgs),
+    /// Unarchive a repository
+    Unarchive(ArchiveArgs),
+    /// Rename a repository
+    Rename(RenameArgs),
+    /// Manage deploy keys
+    DeployKey(DeployKeyCommand),
 }
 
 #[derive(Args)]
@@ -75,6 +87,83 @@ struct ForkArgs {
     repo: String,
 }
 
+#[derive(Args)]
+struct DeleteRepoArgs {
+    /// Confirm deletion (required)
+    #[arg(long)]
+    confirm: bool,
+}
+
+#[derive(Args)]
+struct EditRepoArgs {
+    /// New description
+    #[arg(short, long)]
+    description: Option<String>,
+
+    /// Set default branch
+    #[arg(long)]
+    default_branch: Option<String>,
+
+    /// Set visibility (true = private, false = public)
+    #[arg(long)]
+    private: Option<bool>,
+
+    /// Set website URL
+    #[arg(short, long)]
+    website: Option<String>,
+}
+
+#[derive(Args)]
+struct ArchiveArgs {}
+
+#[derive(Args)]
+struct RenameArgs {
+    /// New repository name
+    name: String,
+}
+
+#[derive(Args)]
+pub struct DeployKeyCommand {
+    #[command(subcommand)]
+    action: DeployKeyAction,
+}
+
+#[derive(Subcommand)]
+enum DeployKeyAction {
+    /// List deploy keys
+    List(DeployKeyListArgs),
+    /// Add a deploy key
+    Add(DeployKeyAddArgs),
+    /// Delete a deploy key
+    Delete(DeployKeyDeleteArgs),
+}
+
+#[derive(Args)]
+struct DeployKeyListArgs {
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
+}
+
+#[derive(Args)]
+struct DeployKeyAddArgs {
+    /// Key title
+    #[arg(short, long)]
+    title: String,
+
+    /// SSH public key (or path to .pub file)
+    key: String,
+
+    /// Read-only access (default: true)
+    #[arg(long, default_value = "true")]
+    read_only: bool,
+}
+
+#[derive(Args)]
+struct DeployKeyDeleteArgs {
+    /// Key ID
+    id: i64,
+}
+
 impl RepoCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
@@ -83,6 +172,12 @@ impl RepoCommand {
             RepoAction::Clone(args) => clone_repo(args).await,
             RepoAction::Create(args) => create_repo(args).await,
             RepoAction::Fork(args) => fork_repo(args).await,
+            RepoAction::Delete(args) => delete_repo(&self.repo, args).await,
+            RepoAction::Edit(args) => edit_repo(&self.repo, args).await,
+            RepoAction::Archive(_) => set_archived(&self.repo, true).await,
+            RepoAction::Unarchive(_) => set_archived(&self.repo, false).await,
+            RepoAction::Rename(args) => rename_repo(&self.repo, args).await,
+            RepoAction::DeployKey(cmd) => deploy_key(&self.repo, cmd).await,
         }
     }
 }
@@ -275,5 +370,207 @@ async fn fork_repo(args: &ForkArgs) -> Result<()> {
     let full_name = forked.full_name.as_deref().unwrap_or("");
     let url = forked.html_url.as_deref().unwrap_or("");
     eprintln!("Forked to {full_name}: {url}");
+    Ok(())
+}
+
+async fn delete_repo(repo_args: &repo::RepoArgs, args: &DeleteRepoArgs) -> Result<()> {
+    if !args.confirm {
+        eyre::bail!("Use --confirm to delete the repository. This cannot be undone.");
+    }
+
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_delete()
+        .owner(owner)
+        .repo(repo)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Deleted repository {owner}/{repo}");
+    Ok(())
+}
+
+async fn edit_repo(repo_args: &repo::RepoArgs, args: &EditRepoArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_edit()
+        .owner(owner)
+        .repo(repo)
+        .body_map(|mut b| {
+            if let Some(ref desc) = args.description {
+                b = b.description(desc.clone());
+            }
+            if let Some(ref branch) = args.default_branch {
+                b = b.default_branch(branch.clone());
+            }
+            if let Some(private) = args.private {
+                b = b.private(private);
+            }
+            if let Some(ref website) = args.website {
+                b = b.website(website.clone());
+            }
+            b
+        })
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Updated repository {owner}/{repo}");
+    Ok(())
+}
+
+async fn set_archived(repo_args: &repo::RepoArgs, archived: bool) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_edit()
+        .owner(owner)
+        .repo(repo)
+        .body_map(|b| b.archived(archived))
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    let action = if archived { "Archived" } else { "Unarchived" };
+    eprintln!("{action} repository {owner}/{repo}");
+    Ok(())
+}
+
+async fn rename_repo(repo_args: &repo::RepoArgs, args: &RenameArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_edit()
+        .owner(owner)
+        .repo(repo)
+        .body_map(|b| b.name(args.name.clone()))
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Renamed {owner}/{repo} → {owner}/{}", args.name);
+    Ok(())
+}
+
+const DEPLOY_KEY_FIELDS: &[&str] = &[
+    "id", "title", "key", "url", "read_only", "created_at",
+];
+
+async fn deploy_key(repo_args: &repo::RepoArgs, cmd: &DeployKeyCommand) -> Result<()> {
+    match &cmd.action {
+        DeployKeyAction::List(args) => deploy_key_list(repo_args, args).await,
+        DeployKeyAction::Add(args) => deploy_key_add(repo_args, args).await,
+        DeployKeyAction::Delete(args) => deploy_key_delete(repo_args, args).await,
+    }
+}
+
+async fn deploy_key_list(repo_args: &repo::RepoArgs, args: &DeployKeyListArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    let keys = api
+        .repo_list_keys()
+        .owner(owner)
+        .repo(repo)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &keys, DEPLOY_KEY_FIELDS);
+    }
+
+    if keys.is_empty() {
+        eprintln!("No deploy keys found");
+        return Ok(());
+    }
+
+    let is_tty = atty_check();
+    if is_tty {
+        println!("{:<6} {:<30} {:<10} {}", "ID", "TITLE", "ACCESS", "FINGERPRINT");
+    }
+
+    for key in &keys {
+        let id = key.id.unwrap_or(0);
+        let title = key.title.as_deref().unwrap_or("");
+        let access = if key.read_only.unwrap_or(true) {
+            "read-only"
+        } else {
+            "read-write"
+        };
+        // Show abbreviated key fingerprint
+        let key_str = key.key.as_deref().unwrap_or("");
+        let fingerprint = if key_str.len() > 30 {
+            format!("{}...{}", &key_str[..20], &key_str[key_str.len() - 10..])
+        } else {
+            key_str.to_string()
+        };
+        println!("{:<6} {:<30} {:<10} {}", id, title, access, fingerprint);
+    }
+
+    Ok(())
+}
+
+async fn deploy_key_add(repo_args: &repo::RepoArgs, args: &DeployKeyAddArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    // If the key looks like a file path, read from file
+    let key_content = if std::path::Path::new(&args.key).exists() {
+        std::fs::read_to_string(&args.key)?
+    } else {
+        args.key.clone()
+    };
+
+    let key = api
+        .repo_create_key()
+        .owner(owner)
+        .repo(repo)
+        .body_map(|b| {
+            b.title(args.title.clone())
+                .key(key_content.trim().to_string())
+                .read_only(args.read_only)
+        })
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    let id = key.id.unwrap_or(0);
+    eprintln!("Added deploy key '{}' (ID: {id})", args.title);
+    Ok(())
+}
+
+async fn deploy_key_delete(repo_args: &repo::RepoArgs, args: &DeployKeyDeleteArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    api.repo_delete_key()
+        .owner(owner)
+        .repo(repo)
+        .id(args.id)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+
+    eprintln!("Deleted deploy key #{}", args.id);
     Ok(())
 }
