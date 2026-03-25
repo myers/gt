@@ -2,6 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod api;
 mod auth;
+mod body;
 mod browse;
 mod config;
 mod config_cmd;

@@ -24,6 +24,7 @@ color-eyre = "0.6"
 chrono = { version = "0.4", features = ["clock"] }
 url = "2"
 inquire = "0.7"
+regex-lite = "0.1"
 tempfile = "3"
 
 [dev-dependencies]

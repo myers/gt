@@ -91,6 +91,10 @@ struct CreateArgs {
     #[arg(short, long)]
     body: Option<String>,
 
+    /// Read body from file (local image/file refs are uploaded as attachments)
+    #[arg(short = 'F', long)]
+    body_file: Option<String>,
+
     /// Labels (comma-separated names — looked up by name)
     #[arg(short, long)]
     label: Vec<String>,
@@ -377,6 +381,18 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    // Resolve body: --body-file takes precedence over --body
+    let body_text = if let Some(ref path) = args.body_file {
+        Some(crate::body::read_body_file(path)?)
+    } else {
+        args.body.clone()
+    };
+    let body_file_dir = args
+        .body_file
+        .as_ref()
+        .and_then(|p| std::path::Path::new(p).parent())
+        .map(|p| p.to_path_buf());
+
     let input = if let Some(ref title) = args.title {
         // Non-interactive: resolve label names to IDs
         let label_ids = if args.label.is_empty() {
@@ -386,7 +402,7 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
         };
         IssueInput {
             title: title.clone(),
-            body: args.body.clone().unwrap_or_default(),
+            body: body_text.unwrap_or_default(),
             label_ids,
             assignees: args.assignee.clone(),
             milestone_id: None,
@@ -422,6 +438,26 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     let number = issue.number.unwrap_or(0);
     let url = issue.html_url.as_deref().unwrap_or("");
     eprintln!("Created issue #{number}: {url}");
+
+    // Upload local file attachments and rewrite body if needed
+    if let Some(ref base_dir) = body_file_dir {
+        let refs = crate::body::find_local_refs(&input.body, base_dir);
+        if !refs.is_empty() {
+            let new_body =
+                crate::body::upload_and_rewrite(&api, &config, owner, repo, number, &input.body, base_dir)
+                    .await?;
+            // Update issue body with rewritten URLs
+            api.issue_edit_issue()
+                .owner(owner)
+                .repo(repo)
+                .index(number)
+                .body_map(|b| b.body(new_body.clone()))
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+            eprintln!("Updated body with uploaded attachments");
+        }
+    }
 
     Ok(())
 }

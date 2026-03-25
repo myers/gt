@@ -83,6 +83,10 @@ struct CreateArgs {
     #[arg(short, long)]
     body: Option<String>,
 
+    /// Read body from file (local image/file refs are uploaded as attachments)
+    #[arg(short = 'F', long)]
+    body_file: Option<String>,
+
     /// Base branch (defaults to repo default branch)
     #[arg(long, default_value = "main")]
     base: String,
@@ -490,8 +494,20 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
         None => detect_current_branch()?,
     };
 
+    // Resolve body: --body-file takes precedence over --body
+    let body_text = if let Some(ref path) = args.body_file {
+        Some(crate::body::read_body_file(path)?)
+    } else {
+        args.body.clone()
+    };
+    let body_file_dir = args
+        .body_file
+        .as_ref()
+        .and_then(|p| std::path::Path::new(p).parent())
+        .map(|p| p.to_path_buf());
+
     let (title, body) = if let Some(ref title) = args.title {
-        (title.clone(), args.body.clone().unwrap_or_default())
+        (title.clone(), body_text.unwrap_or_default())
     } else {
         // Interactive mode
         if !atty_check() {
@@ -518,6 +534,26 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
     let number = pr.number.unwrap_or(0);
     let url = pr.html_url.as_deref().unwrap_or("");
     eprintln!("Created PR #{number}: {url}");
+
+    // Upload local file attachments and rewrite body if needed
+    if let Some(ref base_dir) = body_file_dir {
+        let refs = crate::body::find_local_refs(&body, base_dir);
+        if !refs.is_empty() {
+            let new_body =
+                crate::body::upload_and_rewrite(&api, &config, owner, repo, number, &body, base_dir)
+                    .await?;
+            api.repo_edit_pull_request()
+                .owner(owner)
+                .repo(repo)
+                .index(number)
+                .body_map(|b| b.body(new_body.clone()))
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+            eprintln!("Updated body with uploaded attachments");
+        }
+    }
+
     Ok(())
 }
 
