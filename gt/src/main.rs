@@ -10,6 +10,7 @@ mod issues;
 mod json;
 mod label;
 mod milestone;
+mod notification;
 mod org;
 mod paginate;
 mod project;
@@ -19,6 +20,8 @@ mod release;
 mod repo;
 mod repo_cmd;
 mod run;
+mod secret;
+mod variable;
 
 #[derive(Parser)]
 #[command(name = "gt", about = "Gitea CLI", version)]
@@ -45,6 +48,12 @@ enum Command {
     Project(project::ProjectCommand),
     /// Manage Actions workflow runs
     Run(run::RunCommand),
+    /// Manage repository secrets
+    Secret(secret::SecretCommand),
+    /// Manage repository variables
+    Variable(variable::VariableCommand),
+    /// Manage notifications
+    Notification(notification::NotificationCommand),
     /// Manage organizations
     Org(org::OrgCommand),
     /// Authentication commands
@@ -91,6 +100,9 @@ async fn main() -> eyre::Result<()> {
         Command::Release(cmd) => cmd.run().await,
         Command::Project(cmd) => cmd.run().await,
         Command::Run(cmd) => cmd.run().await,
+        Command::Secret(cmd) => cmd.run().await,
+        Command::Variable(cmd) => cmd.run().await,
+        Command::Notification(cmd) => cmd.run().await,
         Command::Org(cmd) => cmd.run().await,
         Command::Auth(cmd) => cmd.run().await,
         Command::Config(cmd) => cmd.run().await,
