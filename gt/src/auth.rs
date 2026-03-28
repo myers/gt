@@ -18,7 +18,7 @@ enum AuthAction {
     /// Log out (remove config file)
     Logout,
     /// Configure git to use gt as credential helper
-    SetupGit,
+    SetupGit(SetupGitArgs),
     /// Git credential helper (used by git, not invoked directly)
     GitCredential(GitCredentialArgs),
 }
@@ -35,6 +35,17 @@ struct LoginArgs {
 }
 
 #[derive(Args)]
+struct SetupGitArgs {
+    /// The hostname to configure git for (e.g., gitea.example.com)
+    #[arg(short = 'H', long)]
+    hostname: Option<String>,
+
+    /// Force setup even if the host is not authenticated. Requires --hostname.
+    #[arg(short, long)]
+    force: bool,
+}
+
+#[derive(Args)]
 struct GitCredentialArgs {
     /// Operation: get, store, or erase
     operation: String,
@@ -46,7 +57,7 @@ impl AuthCommand {
             AuthAction::Login(args) => login(args),
             AuthAction::Status => status(),
             AuthAction::Logout => logout(),
-            AuthAction::SetupGit => setup_git(),
+            AuthAction::SetupGit(args) => setup_git(args),
             AuthAction::GitCredential(args) => git_credential(args),
         }
     }
@@ -154,40 +165,69 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-fn setup_git() -> Result<()> {
-    let config = crate::config::Config::load()?;
-    let host = format!(
-        "{}://{}",
-        config.url.scheme(),
-        config.url.host_str().ok_or_else(|| eyre::eyre!("No host in URL"))?,
-    );
+fn setup_git(args: &SetupGitArgs) -> Result<()> {
+    if args.force && args.hostname.is_none() {
+        eyre::bail!("--force requires --hostname");
+    }
+
+    let hosts = if let Some(ref hostname) = args.hostname {
+        let scheme = if hostname.starts_with("http://") || hostname.starts_with("https://") {
+            let parsed = url::Url::parse(hostname)
+                .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
+            format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(hostname))
+        } else {
+            format!("https://{hostname}")
+        };
+
+        if !args.force {
+            crate::config::Config::load().map_err(|_| {
+                eyre::eyre!(
+                    "Host is not authenticated. Use --force to set up anyway, or run `gt auth login` first."
+                )
+            })?;
+        }
+
+        vec![scheme]
+    } else {
+        let config = crate::config::Config::load()?;
+        let host = format!(
+            "{}://{}",
+            config.url.scheme(),
+            config.url.host_str().ok_or_else(|| eyre::eyre!("No host in configured URL"))?,
+        );
+        vec![host]
+    };
 
     let gt_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "gt".to_string());
 
     let helper_value = format!("!{gt_path} auth git-credential");
-    let key = format!("credential.{host}.helper");
 
-    let existing = std::process::Command::new("git")
-        .args(["config", "--global", "--get-all", &key])
-        .output()?;
+    for host in &hosts {
+        let key = format!("credential.{host}.helper");
 
-    let already_set = String::from_utf8_lossy(&existing.stdout)
-        .lines()
-        .any(|line| line.trim() == helper_value);
+        let existing = std::process::Command::new("git")
+            .args(["config", "--global", "--get-all", &key])
+            .output()?;
 
-    if !already_set {
-        let status = std::process::Command::new("git")
-            .args(["config", "--global", "--add", &key, &helper_value])
-            .status()?;
-        if !status.success() {
-            eyre::bail!("Failed to configure git credential helper");
+        let already_set = String::from_utf8_lossy(&existing.stdout)
+            .lines()
+            .any(|line| line.trim() == helper_value);
+
+        if !already_set {
+            let status = std::process::Command::new("git")
+                .args(["config", "--global", "--add", &key, &helper_value])
+                .status()?;
+            if !status.success() {
+                eyre::bail!("Failed to configure git credential helper for {host}");
+            }
         }
+
+        eprintln!("Configured git credential helper for {host}");
+        eprintln!("  {key}={helper_value}");
     }
 
-    eprintln!("Configured git credential helper for {host}");
-    eprintln!("  {key}={helper_value}");
     Ok(())
 }
 

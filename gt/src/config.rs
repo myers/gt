@@ -108,10 +108,6 @@ pub fn config_path() -> Option<PathBuf> {
     }
 }
 
-pub fn config_dir() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "gt")?;
-    Some(dirs.config_dir().to_path_buf())
-}
 
 /// Load aliases from config file. Returns empty map if no config or no aliases.
 pub fn load_aliases() -> HashMap<String, String> {
