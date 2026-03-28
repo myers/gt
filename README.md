@@ -4,52 +4,62 @@
 
 A command-line tool for Gitea, modeled after GitHub's `gh` CLI. Built in Rust.
 
-## Commands
+This attempts to be a faithful copy of `gh` for GitHub. Any places it differs should be considered a bug.
 
-| Command | Description |
-|---------|-------------|
-| `gt issue` | Manage issues (list, create, view, edit, close, comment, lock, pin) |
-| `gt pr` | Manage pull requests (list, create, view, merge, diff, checkout) |
-| `gt repo` | Manage repositories (list, create, clone, fork, edit, delete, archive) |
-| `gt label` | Manage labels (list, create, edit, delete, clone) |
-| `gt milestone` | Manage milestones |
-| `gt release` | Manage releases (list, create, edit, delete, with asset upload) |
-| `gt project` | Manage project boards |
-| `gt run` | Manage Actions workflow runs |
-| `gt workflow` | Manage Actions workflows (list, enable, disable, run) |
-| `gt search` | Search repos, issues, users |
-| `gt secret` | Manage repository secrets |
-| `gt variable` | Manage repository variables |
-| `gt notification` | Manage notifications |
-| `gt org` | Manage organizations |
-| `gt ssh-key` | Manage SSH keys |
-| `gt gpg-key` | Manage GPG keys |
-| `gt alias` | Manage command aliases (including shell aliases with `!` prefix) |
-| `gt status` | Dashboard: notifications, assigned issues, review requests |
-| `gt auth` | Authentication (login, logout, status) |
-| `gt api` | Make authenticated API requests |
-| `gt browse` | Open in browser |
-| `gt completion` | Generate shell completions (bash, zsh, fish) |
-
-## Features
-
-- `--json field,field` + `--jq` on list commands
-- `--body-file` with auto-upload of local image/file attachments
-- Interactive create flows (issues, PRs, releases) with `$EDITOR` support
-- Command aliases (`gt alias set co "pr checkout"`, shell aliases with `!`)
-- Pagination, global `-R owner/repo` flag
-
-## Workspace
-
-Cargo workspace with two crates:
-
-- **`gitea-api`** — API client generated from Gitea's OpenAPI 3.0 spec using [progenitor](https://github.com/oxidecomputer/progenitor)
-- **`gt`** — CLI binary
-
-## Building
+## Install
 
 ```bash
-cargo build --release
+cargo install --git https://github.com/myers/gt gt
+```
+
+## Setup
+
+```bash
+gt auth login --url https://your-instance --token YOUR_TOKEN
+gt auth setup-git
+```
+
+The first command saves your Gitea instance URL and API token. The second configures git to authenticate using `gt`, so clone/push/pull just work.
+
+You can generate a token at `https://your-instance/user/settings/applications`.
+
+## Usage
+
+```
+$ gt --help
+Gitea CLI
+
+Usage: gt <COMMAND>
+
+Commands:
+  issue         Manage issues
+  pr            Manage pull requests
+  repo          Manage repositories
+  label         Manage labels
+  milestone     Manage milestones
+  release       Manage releases
+  project       Manage projects
+  run           Manage Actions workflow runs
+  search        Search repos, issues, users
+  secret        Manage repository secrets
+  variable      Manage repository variables
+  notification  Manage notifications
+  workflow      Manage Actions workflows
+  org           Manage organizations
+  ssh-key       Manage your SSH keys
+  gpg-key       Manage your GPG keys
+  alias         Manage command aliases
+  status        Show status dashboard (notifications, assigned, review requests)
+  auth          Authentication commands
+  config        Manage configuration
+  browse        Open in browser
+  api           Make an authenticated API request
+  completion    Generate shell completions
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 ## License
