@@ -216,6 +216,16 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
             .any(|line| line.trim() == helper_value);
 
         if !already_set {
+            let has_reset = String::from_utf8_lossy(&existing.stdout)
+                .lines()
+                .any(|line| line.trim().is_empty());
+
+            if !has_reset {
+                std::process::Command::new("git")
+                    .args(["config", "--global", "--add", &key, ""])
+                    .status()?;
+            }
+
             let status = std::process::Command::new("git")
                 .args(["config", "--global", "--add", &key, &helper_value])
                 .status()?;
