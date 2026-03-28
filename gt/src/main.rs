@@ -105,28 +105,40 @@ struct CompletionArgs {
 }
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
-    color_eyre::install()?;
+async fn main() {
+    color_eyre::install().ok();
 
-    // Check for alias expansion before clap parsing
-    let raw_args: Vec<String> = std::env::args().collect();
-    if raw_args.len() > 1 {
-        let aliases = config::load_aliases();
-        if let Some(expansion) = aliases.get(&raw_args[1]) {
-            if let Some(shell_cmd) = expansion.strip_prefix('!') {
-                return alias::run_shell_alias(shell_cmd, &raw_args[2..]);
+    let result = async {
+        // Check for alias expansion before clap parsing
+        let raw_args: Vec<String> = std::env::args().collect();
+        if raw_args.len() > 1 {
+            let aliases = config::load_aliases();
+            if let Some(expansion) = aliases.get(&raw_args[1]) {
+                if let Some(shell_cmd) = expansion.strip_prefix('!') {
+                    return alias::run_shell_alias(shell_cmd, &raw_args[2..]);
+                }
+                // Regular alias: expand and re-parse
+                let expanded = alias::expand_alias(expansion, &raw_args[2..]);
+                let mut full_args = vec!["gt".to_string()];
+                full_args.extend(expanded);
+                let app = App::parse_from(full_args);
+                return run_app(app).await;
             }
-            // Regular alias: expand and re-parse
-            let expanded = alias::expand_alias(expansion, &raw_args[2..]);
-            let mut full_args = vec!["gt".to_string()];
-            full_args.extend(expanded);
-            let app = App::parse_from(full_args);
-            return run_app(app).await;
         }
-    }
 
-    let app = App::parse();
-    run_app(app).await
+        let app = App::parse();
+        run_app(app).await
+    }
+    .await;
+
+    if let Err(e) = result {
+        if std::env::var("RUST_BACKTRACE").is_ok() {
+            eprintln!("{e:?}");
+        } else {
+            eprintln!("Error: {e}");
+        }
+        std::process::exit(1);
+    }
 }
 
 async fn run_app(app: App) -> eyre::Result<()> {
