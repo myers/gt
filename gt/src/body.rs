@@ -130,9 +130,9 @@ mod tests {
 
     #[test]
     fn test_find_local_refs_with_existing_file() {
-        // Cargo.toml exists in the project root
+        // Cargo.toml exists in the gt crate root
         let body = "See [config](Cargo.toml) for details";
-        let refs = find_local_refs(body, Path::new("/home/user/p/gitea-workspace/gt/gt"));
+        let refs = find_local_refs(body, Path::new(env!("CARGO_MANIFEST_DIR")));
         assert_eq!(refs.len(), 1);
         assert!(refs[0].1.contains("Cargo.toml"));
     }
