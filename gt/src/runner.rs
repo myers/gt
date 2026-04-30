@@ -63,6 +63,8 @@ enum RunnerAction {
     View(ViewArgs),
     /// Delete a runner
     Delete(DeleteArgs),
+    /// Print a runner registration token
+    RegistrationToken(TokenArgs),
 }
 
 #[derive(Args)]
@@ -100,12 +102,19 @@ struct DeleteArgs {
     scope: ScopeArgs,
 }
 
+#[derive(Args)]
+struct TokenArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
 impl RunnerCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             RunnerAction::List(args) => list_runners(&self.repo, args).await,
             RunnerAction::View(args) => view_runner(&self.repo, args).await,
             RunnerAction::Delete(args) => delete_runner(&self.repo, args).await,
+            RunnerAction::RegistrationToken(args) => registration_token(&self.repo, args).await,
         }
     }
 }
@@ -317,6 +326,41 @@ async fn delete_runner(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<
     };
 
     eprintln!("Deleted runner #{}", args.id);
+    Ok(())
+}
+
+async fn registration_token(repo_args: &repo::RepoArgs, args: &TokenArgs) -> Result<()> {
+    use gitea_api::Method;
+
+    let config = Config::load()?;
+    let api = config.client()?;
+    let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
+
+    let path = match &scope {
+        Scope::Admin => "admin/actions/runners/registration-token".to_string(),
+        Scope::Org(o) => format!("orgs/{o}/actions/runners/registration-token"),
+        Scope::Repo { owner, name } => {
+            format!("repos/{owner}/{name}/actions/runners/registration-token")
+        }
+    };
+
+    let resp = api
+        .raw_request(Method::POST, &path, None)
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        eyre::bail!("HTTP {status}: {body}");
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("response did not contain a 'token' field: {body}"))?;
+    println!("{token}");
     Ok(())
 }
 
