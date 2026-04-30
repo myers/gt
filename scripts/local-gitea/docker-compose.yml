@@ -1,0 +1,41 @@
+name: gt-local-gitea
+
+services:
+  gitea:
+    image: ghcr.io/myers/gitea:myers-main-1776639801-4eca6826
+    # The myers/gitea fork only publishes linux/amd64 images.
+    # Apple Silicon hosts run this under Rosetta 2 emulation.
+    platform: linux/amd64
+    container_name: gt-local-gitea
+    restart: unless-stopped
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      # Skip the install wizard. INSTALL_LOCK=true makes Gitea start with the
+      # provided env vars and never prompt.
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: "local-only-do-not-use-in-prod"
+      GITEA__security__INTERNAL_TOKEN: "local-only-do-not-use-in-prod-internal"
+      GITEA__database__DB_TYPE: "sqlite3"
+      GITEA__database__PATH: "/data/gitea/gitea.db"
+      GITEA__server__DOMAIN: "localhost"
+      GITEA__server__ROOT_URL: "http://localhost:3333/"
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__SSH_PORT: "22"
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "false"
+      GITEA__log__MODE: "console"
+      GITEA__log__LEVEL: "info"
+      # Enable Actions so we have something to register runners against.
+      GITEA__actions__ENABLED: "true"
+    ports:
+      - "127.0.0.1:3333:3000"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/v1/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
