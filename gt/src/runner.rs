@@ -59,6 +59,8 @@ pub struct RunnerCommand {
 enum RunnerAction {
     /// List runners
     List(ListArgs),
+    /// View a single runner
+    View(ViewArgs),
 }
 
 #[derive(Args)]
@@ -70,10 +72,24 @@ struct ListArgs {
     json: JsonArgs,
 }
 
+#[derive(Args)]
+struct ViewArgs {
+    /// Runner ID
+    id: i64,
+
+    /// Output raw JSON
+    #[arg(long)]
+    json: bool,
+
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
 impl RunnerCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             RunnerAction::List(args) => list_runners(&self.repo, args).await,
+            RunnerAction::View(args) => view_runner(&self.repo, args).await,
         }
     }
 }
@@ -144,6 +160,61 @@ async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
         let labels = truncate(&labels_string(r), 30);
         let flags = flags_string(r);
         println!("{id:<6} {name:<20} {status:<8} {labels:<30} {flags}");
+    }
+
+    Ok(())
+}
+
+async fn view_runner(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
+    let id = args.id.to_string();
+
+    let runner = match &scope {
+        Scope::Admin => api
+            .get_admin_runner()
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner(),
+        Scope::Org(o) => api
+            .get_org_runner()
+            .org(o.clone())
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner(),
+        Scope::Repo { owner, name } => api
+            .get_repo_runner()
+            .owner(owner.clone())
+            .repo(name.clone())
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner(),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&runner)?);
+        return Ok(());
+    }
+
+    let name = runner.name.as_deref().unwrap_or("(unnamed)");
+    let id_n = runner.id.unwrap_or(0);
+    println!("{name} (#{id_n})");
+    println!("Status: {}", runner.status.as_deref().unwrap_or("unknown"));
+    let labels = labels_string(&runner);
+    if !labels.is_empty() {
+        let pretty = labels.replace(',', ", ");
+        println!("Labels: {pretty}");
+    }
+    let flags = flags_string(&runner);
+    if !flags.is_empty() {
+        println!("Flags: {flags}");
     }
 
     Ok(())
