@@ -61,6 +61,8 @@ enum RunnerAction {
     List(ListArgs),
     /// View a single runner
     View(ViewArgs),
+    /// Delete a runner
+    Delete(DeleteArgs),
 }
 
 #[derive(Args)]
@@ -85,11 +87,25 @@ struct ViewArgs {
     scope: ScopeArgs,
 }
 
+#[derive(Args)]
+struct DeleteArgs {
+    /// Runner ID
+    id: i64,
+
+    /// Skip confirmation prompt
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
 impl RunnerCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             RunnerAction::List(args) => list_runners(&self.repo, args).await,
             RunnerAction::View(args) => view_runner(&self.repo, args).await,
+            RunnerAction::Delete(args) => delete_runner(&self.repo, args).await,
         }
     }
 }
@@ -217,6 +233,90 @@ async fn view_runner(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> 
         println!("Flags: {flags}");
     }
 
+    Ok(())
+}
+
+async fn delete_runner(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let config = Config::load()?;
+    let api = config.client()?;
+    let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
+    let id = args.id.to_string();
+
+    // 1. Non-TTY guard — fail fast before any API call.
+    if !args.yes && !std::io::stdin().is_terminal() {
+        eyre::bail!("refusing to delete without -y/--yes (stdin is not a TTY)");
+    }
+
+    // 2. Fetch runner to get its name (for the prompt). Skip if --yes was given,
+    //    since we won't be prompting.
+    if !args.yes {
+        let runner = match &scope {
+            Scope::Admin => api
+                .get_admin_runner()
+                .runner_id(id.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner(),
+            Scope::Org(o) => api
+                .get_org_runner()
+                .org(o.clone())
+                .runner_id(id.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner(),
+            Scope::Repo { owner, name } => api
+                .get_repo_runner()
+                .owner(owner.clone())
+                .repo(name.clone())
+                .runner_id(id.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner(),
+        };
+        let runner_name = runner.name.as_deref().unwrap_or("(unnamed)");
+
+        // 3. Confirm
+        let prompt = format!("Delete runner #{} \"{}\"?", args.id, runner_name);
+        let confirmed = inquire::Confirm::new(&prompt)
+            .with_default(false)
+            .prompt()?;
+        if !confirmed {
+            eprintln!("Cancelled");
+            return Ok(());
+        }
+    }
+
+    // 3. Delete
+    match &scope {
+        Scope::Admin => api
+            .delete_admin_runner()
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?,
+        Scope::Org(o) => api
+            .delete_org_runner()
+            .org(o.clone())
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?,
+        Scope::Repo { owner, name: rname } => api
+            .delete_repo_runner()
+            .owner(owner.clone())
+            .repo(rname.clone())
+            .runner_id(id.clone())
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?,
+    };
+
+    eprintln!("Deleted runner #{}", args.id);
     Ok(())
 }
 
