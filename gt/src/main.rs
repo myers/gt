@@ -22,6 +22,7 @@ mod release;
 mod repo;
 mod repo_cmd;
 mod run;
+mod runner;
 mod search;
 mod secret;
 mod ssh_key;
@@ -54,6 +55,8 @@ enum Command {
     Project(project::ProjectCommand),
     /// Manage Actions workflow runs
     Run(run::RunCommand),
+    /// Manage Actions runners
+    Runner(runner::RunnerCommand),
     /// Search repos, issues, users
     Search(search::SearchCommand),
     /// Manage repository secrets
@@ -151,6 +154,7 @@ async fn run_app(app: App) -> eyre::Result<()> {
         Command::Release(cmd) => cmd.run().await,
         Command::Project(cmd) => cmd.run().await,
         Command::Run(cmd) => cmd.run().await,
+        Command::Runner(cmd) => cmd.run().await,
         Command::Search(cmd) => cmd.run().await,
         Command::Secret(cmd) => cmd.run().await,
         Command::Variable(cmd) => cmd.run().await,
