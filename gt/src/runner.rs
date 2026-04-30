@@ -173,8 +173,8 @@ async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
     let is_tty = atty_check();
     if is_tty {
         println!(
-            "{:<6} {:<20} {:<8} {:<30} {}",
-            "ID", "NAME", "STATUS", "LABELS", "FLAGS"
+            "{:<6} {:<20} {:<8} {:<30} FLAGS",
+            "ID", "NAME", "STATUS", "LABELS"
         );
     }
 
