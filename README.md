@@ -29,7 +29,7 @@ You can generate a token at `https://your-instance/user/settings/applications`.
 $ gt --help
 Gitea CLI
 
-Usage: gt <COMMAND>
+Usage: gt [OPTIONS] <COMMAND>
 
 Commands:
   issue         Manage issues
@@ -40,6 +40,7 @@ Commands:
   release       Manage releases
   project       Manage projects
   run           Manage Actions workflow runs
+  runner        Manage Actions runners
   search        Search repos, issues, users
   secret        Manage repository secrets
   variable      Manage repository variables
@@ -58,8 +59,10 @@ Commands:
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+  -v, --verbose...    Print HTTP request/response transcripts on stderr. Repeat for more detail (`-vv` includes request/response bodies). Tokens are masked unless `--show-secrets` is passed
+      --show-secrets  With `-v`, print Authorization/Cookie header values unmasked. Off by default — paste-into-chat safety
+  -h, --help          Print help
+  -V, --version       Print version
 ```
 
 ## License
