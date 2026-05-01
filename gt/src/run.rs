@@ -127,6 +127,19 @@ fn step_is_hidden_in_compact(step: &gitea_api::types::ActionWorkflowStep) -> boo
     !visible
 }
 
+fn redraw(prev_lines: &mut Option<usize>, body: &str, is_tty: bool) {
+    let line_count = body.lines().count();
+    if is_tty {
+        if let Some(n) = prev_lines {
+            eprint!("\x1b[{n}F\x1b[J");
+        }
+    } else if prev_lines.is_some() {
+        eprintln!();
+    }
+    eprint!("{body}");
+    *prev_lines = Some(line_count);
+}
+
 #[derive(Args)]
 pub struct RunCommand {
     #[command(flatten)]
@@ -433,17 +446,7 @@ async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
             .jobs;
 
         let body = render_run_state(&run, &jobs, args.compact);
-        let line_count = body.lines().count();
-
-        if is_tty {
-            if let Some(n) = prev_lines {
-                eprint!("\x1b[{n}F\x1b[J");
-            }
-        } else if prev_lines.is_some() {
-            eprintln!();
-        }
-        eprint!("{body}");
-        prev_lines = Some(line_count);
+        redraw(&mut prev_lines, &body, is_tty);
 
         let status = run.status.as_deref().unwrap_or("");
         if is_terminal_status(status) {
@@ -615,6 +618,22 @@ mod tests {
         assert!(out.contains("✓ cargo test"));
         assert!(out.contains("● lint"));
         assert!(out.contains("● clippy"));
+    }
+
+    #[test]
+    fn render_default_shows_queued_job() {
+        let run = make_run(42, "queue check", "in_progress");
+        let jobs = vec![make_job(
+            "release",
+            "queued",
+            None,
+            vec![],
+        )];
+
+        let out = render_run_state(&run, &jobs, false);
+
+        assert!(out.contains("○ release"), "queued job missing icon: {out}");
+        assert!(out.contains("(queued)"), "queued status label missing: {out}");
     }
 
     #[test]
