@@ -5,6 +5,20 @@ use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
 use crate::repo;
 
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required",
+    )
+}
+
+fn is_failure_conclusion(conclusion: &str) -> bool {
+    matches!(
+        conclusion,
+        "failure" | "cancelled" | "timed_out" | "action_required",
+    )
+}
+
 #[derive(Args)]
 pub struct RunCommand {
     #[command(flatten)]
@@ -265,4 +279,41 @@ async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_status_recognises_completed_and_outcome_aliases() {
+        assert!(is_terminal_status("completed"));
+        assert!(is_terminal_status("success"));
+        assert!(is_terminal_status("failure"));
+        assert!(is_terminal_status("cancelled"));
+        assert!(is_terminal_status("skipped"));
+        assert!(is_terminal_status("timed_out"));
+        assert!(is_terminal_status("action_required"));
+    }
+
+    #[test]
+    fn terminal_status_rejects_in_flight_states() {
+        assert!(!is_terminal_status("in_progress"));
+        assert!(!is_terminal_status("queued"));
+        assert!(!is_terminal_status("waiting"));
+        assert!(!is_terminal_status(""));
+    }
+
+    #[test]
+    fn failure_conclusion_truth_table() {
+        assert!(is_failure_conclusion("failure"));
+        assert!(is_failure_conclusion("cancelled"));
+        assert!(is_failure_conclusion("timed_out"));
+        assert!(is_failure_conclusion("action_required"));
+
+        assert!(!is_failure_conclusion("success"));
+        assert!(!is_failure_conclusion("skipped"));
+        assert!(!is_failure_conclusion(""));
+        assert!(!is_failure_conclusion("in_progress"));
+    }
 }
