@@ -32,6 +32,25 @@ fn job_icon(status: &str, conclusion: &str) -> &'static str {
     }
 }
 
+fn partition_runs_for_picker(
+    runs: Vec<gitea_api::types::ActionWorkflowRun>,
+) -> (
+    Vec<gitea_api::types::ActionWorkflowRun>,
+    Vec<gitea_api::types::ActionWorkflowRun>,
+) {
+    let mut in_progress = Vec::new();
+    let mut recent = Vec::new();
+    for run in runs {
+        let status = run.status.as_deref().unwrap_or("");
+        if matches!(status, "in_progress" | "queued" | "waiting") {
+            in_progress.push(run);
+        } else {
+            recent.push(run);
+        }
+    }
+    (in_progress, recent)
+}
+
 fn render_run_state(
     run: &gitea_api::types::ActionWorkflowRun,
     jobs: &[gitea_api::types::ActionWorkflowJob],
@@ -541,5 +560,38 @@ mod tests {
         assert!(out.contains("● build"), "in_progress job missing: {out}");
         assert!(out.contains("● cargo test"), "in_progress step missing: {out}");
         assert!(!out.contains("✓ checkout"), "successful step should be hidden in compact: {out}");
+    }
+
+    #[test]
+    fn partition_runs_separates_in_progress_from_recent() {
+        let runs = vec![
+            make_run(1, "old success", "completed"),
+            make_run(2, "queued", "queued"),
+            make_run(3, "running", "in_progress"),
+            make_run(4, "old failure", "failure"),
+            make_run(5, "waiting", "waiting"),
+        ];
+
+        let (in_progress, recent) = partition_runs_for_picker(runs);
+
+        let in_progress_ids: Vec<_> = in_progress.iter().map(|r| r.id.unwrap()).collect();
+        let recent_ids: Vec<_> = recent.iter().map(|r| r.id.unwrap()).collect();
+
+        assert_eq!(in_progress_ids, vec![2, 3, 5], "in-progress includes waiting/queued/in_progress");
+        assert_eq!(recent_ids, vec![1, 4], "recent is everything else");
+    }
+
+    #[test]
+    fn partition_handles_missing_status_field() {
+        // Status: None → treated as recent (not in-progress).
+        let runs = vec![gitea_api::types::ActionWorkflowRun {
+            id: Some(99),
+            ..Default::default()
+        }];
+
+        let (in_progress, recent) = partition_runs_for_picker(runs);
+
+        assert!(in_progress.is_empty());
+        assert_eq!(recent.len(), 1);
     }
 }
