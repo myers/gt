@@ -30,8 +30,17 @@ mod status;
 mod variable;
 mod workflow;
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("GT_GIT_SHA"),
+    ", built ",
+    env!("GT_BUILD_DATE"),
+    ")",
+);
+
 #[derive(Parser)]
-#[command(name = "gt", about = "Gitea CLI", version)]
+#[command(name = "gt", about = "Gitea CLI", version = VERSION)]
 struct App {
     /// Print HTTP request/response transcripts on stderr. Repeat for more
     /// detail (`-vv` includes request/response bodies). Tokens are masked

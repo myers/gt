@@ -1,9 +1,10 @@
 [package]
 name = "gt"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Gitea CLI - like gh, but for Gitea"
 license = "MIT"
+build = "build.rs"
 
 [[bin]]
 name = "gt"
@@ -26,6 +27,9 @@ url = "2"
 inquire = "0.7"
 regex-lite = "0.1"
 tempfile = "3"
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 assert_cmd = "2"
