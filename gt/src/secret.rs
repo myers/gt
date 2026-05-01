@@ -36,7 +36,7 @@ struct SetArgs {
     name: String,
 
     /// Secret value (reads from stdin if omitted)
-    #[arg(short, long)]
+    #[arg(long)]
     value: Option<String>,
 }
 

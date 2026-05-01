@@ -38,7 +38,7 @@ struct CreateArgs {
     description: Option<String>,
 
     /// Visibility (public or private)
-    #[arg(short, long, default_value = "public")]
+    #[arg(long, default_value = "public")]
     visibility: String,
 }
 

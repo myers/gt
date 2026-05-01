@@ -1,4 +1,4 @@
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 
 mod alias;
 mod api;
@@ -33,6 +33,17 @@ mod workflow;
 #[derive(Parser)]
 #[command(name = "gt", about = "Gitea CLI", version)]
 struct App {
+    /// Print HTTP request/response transcripts on stderr. Repeat for more
+    /// detail (`-vv` includes request/response bodies). Tokens are masked
+    /// unless `--show-secrets` is passed.
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// With `-v`, print Authorization/Cookie header values unmasked. Off
+    /// by default — paste-into-chat safety.
+    #[arg(long = "show-secrets", global = true)]
+    show_secrets: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -145,6 +156,13 @@ async fn main() {
 }
 
 async fn run_app(app: App) -> eyre::Result<()> {
+    if app.verbose > 0 || app.show_secrets {
+        gitea_api::verbose::set_config(gitea_api::verbose::VerboseConfig {
+            level: app.verbose,
+            show_secrets: app.show_secrets,
+        });
+    }
+
     let result = match app.command {
         Command::Issue(cmd) => cmd.run().await,
         Command::Pr(cmd) => cmd.run().await,

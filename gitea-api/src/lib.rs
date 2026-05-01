@@ -20,6 +20,8 @@
 // Include the progenitor-generated client code.
 include!(concat!(env!("OUT_DIR"), "/codegen.rs"));
 
+pub mod verbose;
+
 /// Deserialize a Vec that may be `null` in JSON (some APIs send `null` for empty arrays).
 pub fn null_as_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
@@ -125,11 +127,16 @@ impl Gitea {
             return Err(GiteaError::HttpRequired);
         }
 
+        // Auth is injected per-request via the `ClientHooks::pre` hook so
+        // verbose transcripts can see the header. (Setting it via
+        // `default_headers` works at the wire level, but the Authorization
+        // value never lands on the `reqwest::Request` object inspected by
+        // hooks.)
         let auth_headers = auth.to_headers()?;
+        verbose::set_auth_headers(auth_headers);
 
         let reqwest_client = reqwest::Client::builder()
             .user_agent("gitea-api-rs")
-            .default_headers(auth_headers)
             .build()
             .expect("failed to build reqwest client");
 
@@ -153,7 +160,9 @@ impl Gitea {
     /// Auth headers are included automatically. Returns error on non-success status.
     pub async fn raw_get(&self, path: &str) -> Result<String, GiteaError> {
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
-        let resp = self.reqwest_client.get(&url).send().await?;
+        let mut req = self.reqwest_client.get(&url).build()?;
+        verbose::apply_auth_headers(&mut req);
+        let resp = self.reqwest_client.execute(req).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -183,7 +192,9 @@ impl Gitea {
         if let Some(body) = body {
             req = req.header("Content-Type", "application/json").json(body);
         }
-        Ok(req.send().await?)
+        let mut built = req.build()?;
+        verbose::apply_auth_headers(&mut built);
+        Ok(self.reqwest_client.execute(built).await?)
     }
 
     /// Make a fully customizable request. Used by `gt api` for arbitrary endpoints
@@ -203,7 +214,20 @@ impl Gitea {
         if let Some(body) = body {
             req = req.header("Content-Type", "application/json").json(body);
         }
-        Ok(req.send().await?)
+        let mut built = req.build()?;
+        verbose::apply_auth_headers(&mut built);
+        if let Some(cfg) = verbose::config()
+            && cfg.is_on()
+        {
+            verbose::print_request(&built, None, cfg);
+        }
+        let resp = self.reqwest_client.execute(built).await?;
+        if let Some(cfg) = verbose::config()
+            && cfg.is_on()
+        {
+            verbose::print_response_head(&resp, cfg);
+        }
+        Ok(resp)
     }
 
     /// Build a full URL from an API path (prepends base_url).
