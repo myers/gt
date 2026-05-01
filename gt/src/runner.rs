@@ -15,7 +15,7 @@ struct ScopeArgs {
     admin: bool,
 
     /// Organization name
-    #[arg(long, value_name = "NAME")]
+    #[arg(short = 'o', long, value_name = "NAME")]
     org: Option<String>,
 }
 
