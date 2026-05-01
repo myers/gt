@@ -48,12 +48,22 @@ struct RerunArgs {
 
 #[derive(Args)]
 struct WatchArgs {
-    /// Run ID
-    id: i64,
+    /// Run ID. If omitted, prompt to pick from in-progress runs.
+    id: Option<i64>,
 
-    /// Poll interval in seconds
-    #[arg(short, long, default_value = "5")]
+    /// Refresh interval in seconds.
+    #[arg(short = 'i', long, default_value = "3")]
     interval: u64,
+
+    /// Hide successful steps; show only relevant/failed steps.
+    #[arg(long)]
+    compact: bool,
+
+    /// Exit non-zero if the run's conclusion is a failure. By default,
+    /// `gt run watch` exits 0 once the run reaches a terminal state,
+    /// regardless of conclusion (matches `gh run watch`).
+    #[arg(long = "exit-status")]
+    exit_status: bool,
 }
 
 #[derive(Args)]
@@ -198,70 +208,8 @@ async fn rerun_run(repo_args: &repo::RepoArgs, args: &RerunArgs) -> Result<()> {
 }
 
 async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
-    let config = Config::load()?;
-    let api = config.client()?;
-    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
-    let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
-
-    loop {
-        let run = api
-            .get_workflow_run()
-            .owner(owner)
-            .repo(repo)
-            .run(args.id)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner();
-
-        let title = run.display_title.as_deref().unwrap_or("(unnamed)");
-        let status = run.status.as_deref().unwrap_or("unknown");
-        let conclusion = run.conclusion.as_deref().unwrap_or("");
-
-        // Fetch jobs for this run
-        let jobs_resp = api
-            .raw_get(&format!("repos/{owner}/{repo}/actions/runs/{}/jobs", args.id))
-            .await
-            .map_err(|e| eyre::eyre!("{e}"))?;
-        let jobs: serde_json::Value = serde_json::from_str(&jobs_resp)?;
-
-        // Clear screen and show status
-        eprint!("\x1b[2J\x1b[H");
-        eprintln!("Run #{} — {title}", args.id);
-        eprintln!("Status: {status}{}\n", if conclusion.is_empty() { String::new() } else { format!(" ({conclusion})") });
-
-        if let Some(job_list) = jobs.get("jobs").and_then(|j| j.as_array()) {
-            for job in job_list {
-                let name = job["name"].as_str().unwrap_or("?");
-                let jstatus = job["status"].as_str().unwrap_or("?");
-                let jconclusion = job["conclusion"].as_str().unwrap_or("");
-                let icon = match (jstatus, jconclusion) {
-                    (_, "success") => "✓",
-                    (_, "failure") => "✗",
-                    (_, "cancelled") => "⊘",
-                    ("running", _) | ("in_progress", _) => "●",
-                    ("waiting", _) | ("queued", _) => "○",
-                    _ => "?",
-                };
-                eprintln!("  {icon} {name} — {jstatus}{}", if jconclusion.is_empty() { String::new() } else { format!(" ({jconclusion})") });
-            }
-        }
-
-        // Check if done
-        match status {
-            "completed" | "cancelled" | "failure" | "success" => {
-                eprintln!("\nRun completed with status: {status}{}", if conclusion.is_empty() { String::new() } else { format!(" ({conclusion})") });
-                if conclusion == "failure" {
-                    std::process::exit(1);
-                }
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        eprintln!("\nRefreshing in {}s...", args.interval);
-        tokio::time::sleep(std::time::Duration::from_secs(args.interval)).await;
-    }
+    let _ = (repo_args, args);
+    eyre::bail!("watch_run: not yet implemented")
 }
 
 async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
