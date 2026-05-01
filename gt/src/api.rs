@@ -199,6 +199,9 @@ impl ApiCommand {
         if !resp.status().is_success() && !self.include {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            for line in auth_hint_for(status.as_u16(), &text) {
+                eprintln!("hint: {line}");
+            }
             eyre::bail!("{} {}\n{}", status.as_u16(), status.canonical_reason().unwrap_or(""), text);
         }
 
@@ -225,6 +228,41 @@ impl ApiCommand {
         }
         Ok(())
     }
+}
+
+/// Build hint lines for auth-related failures (401/403). Returns an empty
+/// vec for other status codes or unrecognized bodies.
+fn auth_hint_for(status: u16, body: &str) -> Vec<String> {
+    match status {
+        401 => vec![
+            "token rejected by server. Run `gt auth login` to refresh.".to_string(),
+        ],
+        403 => {
+            let message = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v["message"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            if let Some(scopes) = extract_required_scopes(&message) {
+                vec![
+                    format!("token is missing required scope(s): {scopes}"),
+                    "re-run `gt auth login` with a token that includes those scopes,".to_string(),
+                    "      or use a different token (admin tokens cover read:admin).".to_string(),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Pull the contents of `required=[...]` out of a Gitea 403 message, if present.
+fn extract_required_scopes(message: &str) -> Option<String> {
+    let start = message.find("required=[")? + "required=[".len();
+    let rest = &message[start..];
+    let end = rest.find(']')?;
+    let scopes = rest[..end].trim();
+    if scopes.is_empty() { None } else { Some(scopes.to_string()) }
 }
 
 fn parse_key_value(s: &str) -> Result<(String, String)> {
@@ -274,6 +312,47 @@ mod tests {
         assert_eq!(v, "hello");
 
         assert!(parse_key_value("noeq").is_err());
+    }
+
+    #[test]
+    fn test_auth_hint_for_401() {
+        let hints = auth_hint_for(401, r#"{"message":"unauthorized"}"#);
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("gt auth login"));
+    }
+
+    #[test]
+    fn test_auth_hint_for_403_with_required_scope() {
+        let body = r#"{"message":"token does not have at least one of required scope(s), required=[read:admin], token scope=write:user","url":"https://gt.example/api/swagger"}"#;
+        let hints = auth_hint_for(403, body);
+        assert!(!hints.is_empty(), "expected hints for scope-shaped 403");
+        assert!(hints[0].contains("read:admin"), "expected hint to name missing scope, got {hints:?}");
+    }
+
+    #[test]
+    fn test_auth_hint_for_403_without_scope_info() {
+        let hints = auth_hint_for(403, r#"{"message":"forbidden"}"#);
+        assert!(hints.is_empty(), "no scope info => no hint, got {hints:?}");
+    }
+
+    #[test]
+    fn test_auth_hint_for_other_status() {
+        assert!(auth_hint_for(404, r#"{"message":"not found"}"#).is_empty());
+        assert!(auth_hint_for(500, "").is_empty());
+    }
+
+    #[test]
+    fn test_extract_required_scopes() {
+        assert_eq!(
+            extract_required_scopes("required=[read:admin], token scope=..."),
+            Some("read:admin".to_string()),
+        );
+        assert_eq!(
+            extract_required_scopes("required=[read:admin write:user], token scope=..."),
+            Some("read:admin write:user".to_string()),
+        );
+        assert_eq!(extract_required_scopes("forbidden"), None);
+        assert_eq!(extract_required_scopes("required=[]"), None);
     }
 
     #[test]
