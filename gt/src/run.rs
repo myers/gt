@@ -329,6 +329,73 @@ async fn rerun_run(repo_args: &repo::RepoArgs, args: &RerunArgs) -> Result<()> {
     Ok(())
 }
 
+fn format_run_picker_label(run: &gitea_api::types::ActionWorkflowRun) -> String {
+    let id = run.id.unwrap_or(0);
+    let status = run.status.as_deref().unwrap_or("");
+    let conclusion = run.conclusion.as_deref().unwrap_or("");
+    let icon = job_icon(status, conclusion);
+    let branch = run.head_branch.as_deref().unwrap_or("");
+    let title = run.display_title.as_deref().unwrap_or("(unnamed)");
+    format!("{icon} #{id} {branch} {title}")
+}
+
+async fn pick_run(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64> {
+    let resp = api
+        .get_workflow_runs()
+        .owner(owner)
+        .repo(repo)
+        .page(1)
+        .limit(30)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .into_inner();
+
+    let (in_progress, recent) = partition_runs_for_picker(resp.workflow_runs);
+
+    if in_progress.is_empty() && recent.is_empty() {
+        eprintln!("No workflow runs found");
+        std::process::exit(0);
+    }
+
+    // Build labels and a parallel id vector. inquire::Select returns the
+    // chosen label; we look up its id by index.
+    let mut labels: Vec<String> = Vec::new();
+    let mut ids: Vec<i64> = Vec::new();
+    for run in in_progress.iter() {
+        labels.push(format_run_picker_label(run));
+        ids.push(run.id.unwrap_or(0));
+    }
+    if !in_progress.is_empty() && !recent.is_empty() {
+        labels.push("───── recent ─────".to_string());
+        ids.push(-1); // sentinel for the separator
+    }
+    for run in recent.iter().take(10) {
+        labels.push(format_run_picker_label(run));
+        ids.push(run.id.unwrap_or(0));
+    }
+
+    let chosen = match inquire::Select::new("Pick a run to watch:", labels.clone()).prompt() {
+        Ok(s) => s,
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => {
+            std::process::exit(130);
+        }
+        Err(e) => return Err(eyre::eyre!("{e}")),
+    };
+
+    let idx = labels
+        .iter()
+        .position(|l| l == &chosen)
+        .ok_or_else(|| eyre::eyre!("internal: picked label not found"))?;
+    let id = ids[idx];
+    if id < 0 {
+        // User somehow selected the separator; treat as cancel.
+        std::process::exit(130);
+    }
+    Ok(id)
+}
+
 async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
     let _ = (repo_args, args);
     eyre::bail!("watch_run: not yet implemented")
