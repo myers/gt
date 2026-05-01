@@ -14,13 +14,21 @@ enum AuthAction {
     /// Log in to a Gitea instance
     Login(LoginArgs),
     /// Show current authentication status
-    Status,
+    Status(AuthStatusArgs),
     /// Log out (remove config file)
     Logout,
     /// Configure git to use gt as credential helper
     SetupGit(SetupGitArgs),
     /// Git credential helper (used by git, not invoked directly)
     GitCredential(GitCredentialArgs),
+}
+
+#[derive(Args)]
+struct AuthStatusArgs {
+    /// Skip the network probe and report only the locally stored config.
+    /// Useful for shell prompts that need zero-network output.
+    #[arg(long = "no-check")]
+    no_check: bool,
 }
 
 #[derive(Args)]
@@ -55,7 +63,7 @@ impl AuthCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             AuthAction::Login(args) => login(args),
-            AuthAction::Status => status(),
+            AuthAction::Status(args) => status(args).await,
             AuthAction::Logout => logout(),
             AuthAction::SetupGit(args) => setup_git(args),
             AuthAction::GitCredential(args) => git_credential(args),
@@ -115,41 +123,85 @@ fn login(args: &LoginArgs) -> Result<()> {
     Ok(())
 }
 
-fn status() -> Result<()> {
-    let path = config_path()?;
+async fn status(args: &AuthStatusArgs) -> Result<()> {
+    // Resolve config the same way every other gt command does, so the
+    // displayed url/token match what a probe would actually use. This means
+    // env vars (GITEA_URL, GITEA_TOKEN) win over the file — and the user
+    // sees that in the output.
+    let api_config = match crate::config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            let path = config_path()?;
+            if !path.exists() {
+                eprintln!("Not logged in (no config file at {})", path.display());
+            } else {
+                eprintln!("{e}");
+            }
+            eyre::bail!("not logged in");
+        }
+    };
 
-    if !path.exists() {
-        eprintln!("Not logged in (no config file at {})", path.display());
+    let path = config_path()?;
+    let path_display = if path.exists() {
+        path.display().to_string()
+    } else {
+        "(env vars only)".to_string()
+    };
+
+    println!("URL:   {}", api_config.url);
+    println!("Token: {}", mask_token(&api_config.token));
+    println!("Config: {path_display}");
+
+    if args.no_check {
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&path)?;
-    let config: toml::Value = toml::from_str(&content)?;
+    let api = api_config
+        .client()
+        .map_err(|e| eyre::eyre!("could not build API client: {e}"))?;
 
-    let url = config
-        .get("default")
-        .and_then(|d| d.get("url"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("(not set)");
+    match api.user_get_current().send().await {
+        Ok(rv) => {
+            let user = rv.into_inner();
+            let login = user.login.as_deref().unwrap_or("(unknown)");
+            let admin_tag = if user.is_admin.unwrap_or(false) {
+                " (admin)"
+            } else {
+                ""
+            };
+            println!("Logged in as {login}{admin_tag} — token valid");
+            Ok(())
+        }
+        Err(e) => {
+            let status = e.status().map(|s| s.as_u16());
+            match status {
+                Some(401) => {
+                    eprintln!(
+                        "Token rejected by server. Run `gt auth login` to refresh."
+                    );
+                    eyre::bail!("token invalid (401)");
+                }
+                Some(code) => {
+                    eprintln!("Probe failed: server returned {code}");
+                    eyre::bail!("probe failed (HTTP {code})");
+                }
+                None => {
+                    eprintln!("Probe failed: {e}");
+                    eyre::bail!("probe failed");
+                }
+            }
+        }
+    }
+}
 
-    let token = config
-        .get("default")
-        .and_then(|d| d.get("token"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
-
-    let token_preview = if token.len() > 8 {
+fn mask_token(token: &str) -> String {
+    if token.len() > 8 {
         format!("{}...{}", &token[..4], &token[token.len() - 4..])
     } else if !token.is_empty() {
         "****".to_string()
     } else {
         "(not set)".to_string()
-    };
-
-    println!("URL:   {url}");
-    println!("Token: {token_preview}");
-    println!("Config: {}", path.display());
-    Ok(())
+    }
 }
 
 fn logout() -> Result<()> {
@@ -277,3 +329,24 @@ fn git_credential(args: &GitCredentialArgs) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::mask_token;
+
+    #[test]
+    fn mask_long_token() {
+        assert_eq!(mask_token("aafe123456789a263"), "aafe...a263");
+    }
+
+    #[test]
+    fn mask_short_token() {
+        assert_eq!(mask_token("short"), "****");
+    }
+
+    #[test]
+    fn mask_empty_token() {
+        assert_eq!(mask_token(""), "(not set)");
+    }
+}
+
