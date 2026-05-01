@@ -397,8 +397,65 @@ async fn pick_run(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64
 }
 
 async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
-    let _ = (repo_args, args);
-    eyre::bail!("watch_run: not yet implemented")
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, repo_name) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    let run_id = match args.id {
+        Some(id) => id,
+        None => pick_run(&api, owner, repo_name).await?,
+    };
+
+    let is_tty = crate::issues::atty_check();
+    let mut prev_lines: Option<usize> = None;
+
+    loop {
+        let run = api
+            .get_workflow_run()
+            .owner(owner)
+            .repo(repo_name)
+            .run(run_id)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner();
+
+        let jobs = api
+            .list_workflow_run_jobs()
+            .owner(owner)
+            .repo(repo_name)
+            .run(run_id)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner()
+            .jobs;
+
+        let body = render_run_state(&run, &jobs, args.compact);
+        let line_count = body.lines().count();
+
+        if is_tty {
+            if let Some(n) = prev_lines {
+                eprint!("\x1b[{n}F\x1b[J");
+            }
+        } else if prev_lines.is_some() {
+            eprintln!();
+        }
+        eprint!("{body}");
+        prev_lines = Some(line_count);
+
+        let status = run.status.as_deref().unwrap_or("");
+        if is_terminal_status(status) {
+            let conclusion = run.conclusion.as_deref().unwrap_or("");
+            if args.exit_status && (is_failure_conclusion(status) || is_failure_conclusion(conclusion)) {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(args.interval)).await;
+    }
 }
 
 async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
