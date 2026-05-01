@@ -19,6 +19,63 @@ fn is_failure_conclusion(conclusion: &str) -> bool {
     )
 }
 
+fn job_icon(status: &str, conclusion: &str) -> &'static str {
+    match (status, conclusion) {
+        (_, "success") => "✓",
+        (_, "failure") => "✗",
+        (_, "cancelled") => "⊘",
+        (_, "timed_out") => "✗",
+        (_, "action_required") => "✗",
+        ("in_progress", _) => "●",
+        ("queued", _) | ("waiting", _) => "○",
+        _ => "?",
+    }
+}
+
+fn render_run_state(
+    run: &gitea_api::types::ActionWorkflowRun,
+    jobs: &[gitea_api::types::ActionWorkflowJob],
+    compact: bool,
+) -> String {
+    let _ = compact; // wired in Task 4
+    let mut out = String::new();
+    let id = run.id.unwrap_or(0);
+    let title = run.display_title.as_deref().unwrap_or("(unnamed)");
+    let status = run.status.as_deref().unwrap_or("unknown");
+    let conclusion = run.conclusion.as_deref().unwrap_or("");
+
+    out.push_str(&format!("Run #{id} — {title}\n"));
+    if conclusion.is_empty() {
+        out.push_str(&format!("Status: {status}\n"));
+    } else {
+        out.push_str(&format!("Status: {status} ({conclusion})\n"));
+    }
+    out.push('\n');
+
+    for job in jobs {
+        let jname = job.name.as_deref().unwrap_or("(unnamed job)");
+        let jstatus = job.status.as_deref().unwrap_or("");
+        let jconclusion = job.conclusion.as_deref().unwrap_or("");
+        let icon = job_icon(jstatus, jconclusion);
+        if jconclusion.is_empty() {
+            out.push_str(&format!("  {icon} {jname} ({jstatus})\n"));
+        } else if jconclusion == "success" {
+            out.push_str(&format!("  {icon} {jname}\n"));
+        } else {
+            out.push_str(&format!("  {icon} {jname} ({jconclusion})\n"));
+        }
+        for step in &job.steps {
+            let sname = step.name.as_deref().unwrap_or("(unnamed step)");
+            let sstatus = step.status.as_deref().unwrap_or("");
+            let sconclusion = step.conclusion.as_deref().unwrap_or("");
+            let sicon = job_icon(sstatus, sconclusion);
+            out.push_str(&format!("    {sicon} {sname}\n"));
+        }
+    }
+
+    out
+}
+
 #[derive(Args)]
 pub struct RunCommand {
     #[command(flatten)]
@@ -315,5 +372,73 @@ mod tests {
         assert!(!is_failure_conclusion("skipped"));
         assert!(!is_failure_conclusion(""));
         assert!(!is_failure_conclusion("in_progress"));
+    }
+
+    fn make_run(id: i64, title: &str, status: &str) -> gitea_api::types::ActionWorkflowRun {
+        gitea_api::types::ActionWorkflowRun {
+            id: Some(id),
+            display_title: Some(title.to_string()),
+            status: Some(status.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_step(name: &str, status: &str, conclusion: Option<&str>) -> gitea_api::types::ActionWorkflowStep {
+        gitea_api::types::ActionWorkflowStep {
+            name: Some(name.to_string()),
+            status: Some(status.to_string()),
+            conclusion: conclusion.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn make_job(
+        name: &str,
+        status: &str,
+        conclusion: Option<&str>,
+        steps: Vec<gitea_api::types::ActionWorkflowStep>,
+    ) -> gitea_api::types::ActionWorkflowJob {
+        gitea_api::types::ActionWorkflowJob {
+            name: Some(name.to_string()),
+            status: Some(status.to_string()),
+            conclusion: conclusion.map(str::to_string),
+            steps,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_default_shows_every_step() {
+        let run = make_run(42, "feat: hello", "in_progress");
+        let jobs = vec![
+            make_job(
+                "build",
+                "completed",
+                Some("success"),
+                vec![
+                    make_step("checkout", "completed", Some("success")),
+                    make_step("cargo test", "completed", Some("success")),
+                ],
+            ),
+            make_job(
+                "lint",
+                "in_progress",
+                None,
+                vec![
+                    make_step("checkout", "completed", Some("success")),
+                    make_step("clippy", "in_progress", None),
+                ],
+            ),
+        ];
+
+        let out = render_run_state(&run, &jobs, false);
+
+        assert!(out.contains("Run #42 — feat: hello"), "header missing: {out}");
+        assert!(out.contains("Status: in_progress"), "status missing: {out}");
+        assert!(out.contains("✓ build"));
+        assert!(out.contains("✓ checkout"));
+        assert!(out.contains("✓ cargo test"));
+        assert!(out.contains("● lint"));
+        assert!(out.contains("● clippy"));
     }
 }
