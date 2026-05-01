@@ -1,5 +1,14 @@
 # gt — project notes for Claude
 
+## Stability
+
+This is alpha software. The only users are the author and Claude. **No one
+should expect a stable interface.** Don't preserve old exit codes, output
+formats, flag spellings, or config keys for backwards compatibility — if the
+new behavior is better (especially: closer to `gh` parity per README), just
+change it. Don't add deprecation shims, `--legacy-foo` flags, or compat
+warnings.
+
 ## Versioning
 
 Bump `gt/Cargo.toml`'s `version` on every commit, as you (Claude) feel
