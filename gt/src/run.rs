@@ -37,7 +37,6 @@ fn render_run_state(
     jobs: &[gitea_api::types::ActionWorkflowJob],
     compact: bool,
 ) -> String {
-    let _ = compact; // wired in Task 4
     let mut out = String::new();
     let id = run.id.unwrap_or(0);
     let title = run.display_title.as_deref().unwrap_or("(unnamed)");
@@ -52,10 +51,17 @@ fn render_run_state(
     }
     out.push('\n');
 
+    let mut any_job_rendered = false;
     for job in jobs {
         let jname = job.name.as_deref().unwrap_or("(unnamed job)");
         let jstatus = job.status.as_deref().unwrap_or("");
         let jconclusion = job.conclusion.as_deref().unwrap_or("");
+
+        if compact && job_is_fully_green(job) {
+            continue;
+        }
+        any_job_rendered = true;
+
         let icon = job_icon(jstatus, jconclusion);
         if jconclusion.is_empty() {
             out.push_str(&format!("  {icon} {jname} ({jstatus})\n"));
@@ -64,7 +70,11 @@ fn render_run_state(
         } else {
             out.push_str(&format!("  {icon} {jname} ({jconclusion})\n"));
         }
+
         for step in &job.steps {
+            if compact && step_is_hidden_in_compact(step) {
+                continue;
+            }
             let sname = step.name.as_deref().unwrap_or("(unnamed step)");
             let sstatus = step.status.as_deref().unwrap_or("");
             let sconclusion = step.conclusion.as_deref().unwrap_or("");
@@ -73,7 +83,29 @@ fn render_run_state(
         }
     }
 
+    if compact && !any_job_rendered {
+        out.push_str("  (all steps passing so far)\n");
+    }
+
     out
+}
+
+fn job_is_fully_green(job: &gitea_api::types::ActionWorkflowJob) -> bool {
+    let conclusion = job.conclusion.as_deref().unwrap_or("");
+    if conclusion != "success" {
+        return false;
+    }
+    job.steps
+        .iter()
+        .all(|s| s.conclusion.as_deref() == Some("success"))
+}
+
+fn step_is_hidden_in_compact(step: &gitea_api::types::ActionWorkflowStep) -> bool {
+    let conclusion = step.conclusion.as_deref().unwrap_or("");
+    let status = step.status.as_deref().unwrap_or("");
+    let visible = matches!(conclusion, "failure" | "cancelled" | "timed_out" | "action_required")
+        || matches!(status, "in_progress" | "queued" | "waiting");
+    !visible
 }
 
 #[derive(Args)]
@@ -440,5 +472,74 @@ mod tests {
         assert!(out.contains("✓ cargo test"));
         assert!(out.contains("● lint"));
         assert!(out.contains("● clippy"));
+    }
+
+    #[test]
+    fn render_compact_hides_fully_successful_jobs() {
+        let run = make_run(42, "feat: hello", "in_progress");
+        let jobs = vec![
+            make_job(
+                "build",
+                "completed",
+                Some("success"),
+                vec![make_step("cargo test", "completed", Some("success"))],
+            ),
+            make_job(
+                "lint",
+                "completed",
+                Some("failure"),
+                vec![
+                    make_step("checkout", "completed", Some("success")),
+                    make_step("clippy", "completed", Some("failure")),
+                ],
+            ),
+        ];
+
+        let out = render_run_state(&run, &jobs, true);
+
+        // The all-green build job is hidden entirely.
+        assert!(!out.contains("build"), "compact should hide successful job: {out}");
+        // The failing lint job is shown.
+        assert!(out.contains("✗ lint"), "lint job should appear: {out}");
+        // Within the failing job, only the failed step shows.
+        assert!(out.contains("✗ clippy"), "failed step should appear: {out}");
+        assert!(!out.contains("✓ checkout"), "passing step should be hidden: {out}");
+    }
+
+    #[test]
+    fn render_compact_collapses_all_green() {
+        let run = make_run(42, "all green", "in_progress");
+        let jobs = vec![make_job(
+            "build",
+            "completed",
+            Some("success"),
+            vec![make_step("cargo test", "completed", Some("success"))],
+        )];
+
+        let out = render_run_state(&run, &jobs, true);
+
+        assert!(out.contains("Run #42"));
+        assert!(out.contains("(all steps passing so far)"), "fallback line missing: {out}");
+        assert!(!out.contains("build"), "no jobs should appear in compact all-green: {out}");
+    }
+
+    #[test]
+    fn render_compact_shows_in_progress_job() {
+        let run = make_run(42, "in flight", "in_progress");
+        let jobs = vec![make_job(
+            "build",
+            "in_progress",
+            None,
+            vec![
+                make_step("checkout", "completed", Some("success")),
+                make_step("cargo test", "in_progress", None),
+            ],
+        )];
+
+        let out = render_run_state(&run, &jobs, true);
+
+        assert!(out.contains("● build"), "in_progress job missing: {out}");
+        assert!(out.contains("● cargo test"), "in_progress step missing: {out}");
+        assert!(!out.contains("✓ checkout"), "successful step should be hidden in compact: {out}");
     }
 }
