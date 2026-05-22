@@ -103,6 +103,20 @@ without waiting for dedicated subcommands.
 - [x] `gt run list` — list workflow runs
 - [x] `gt run view <id>` — view run details and logs
 - [x] `gt run rerun <id>` — rerun a workflow
+- [x] `gt run watch [<id>]` — poll until complete (`--exit-status`, `--compact`, `--interval`)
+- [x] `gt run download <id>` — download artifacts (`-d <dir>`)
+- [ ] `gt run cancel <id>` — cancel an in-progress run (mirrors `gh run cancel`)
+- [ ] `gt run delete <id>` — delete a run from history (mirrors `gh run delete`)
+
+### `gt secret` — Actions secrets (gap, hit during 2026-05 drawbar eval)
+Mirrors `gh secret`. Today the only path is `gt api --method PUT
+repos/{owner}/{repo}/actions/secrets/<NAME> --field 'data=<value>'`,
+which is awkward enough that it surprised me twice in one session.
+
+- [ ] `gt secret list` — list repo/org actions secrets (names only, never values)
+- [ ] `gt secret set <NAME>` — create or update; read value from `--body`, `--body-file`, or stdin
+- [ ] `gt secret delete <NAME>` — remove a secret
+- [ ] `--org <ORG>` flag so each subcommand can target org secrets instead of repo secrets
 
 ### `gt org` — Organization management
 - [x] `gt org list` — list orgs the user belongs to
